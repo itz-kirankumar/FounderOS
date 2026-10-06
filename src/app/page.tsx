@@ -75,10 +75,6 @@ import {
   type TeamRole,
 } from "@/lib/data";
 import {
-  requestGoogleCalendarAccess,
-  scheduleGoogleMeeting,
-} from "@/lib/google-calendar";
-import {
   dateKeyInTimezone,
   detectBrowserTimezone,
   formatDateInTimezone,
@@ -258,12 +254,14 @@ export default function Home() {
   const [commentDraft, setCommentDraft] = useState("");
   const [replyTo, setReplyTo] = useState<Item | null>(null);
   const [description, setDescription] = useState("");
-  const [attendeeEmails, setAttendeeEmails] = useState("");
   const [meetingStart, setMeetingStart] = useState("");
   const [meetingEnd, setMeetingEnd] = useState("");
   const [scheduleMeetingOnCreate, setScheduleMeetingOnCreate] = useState(false);
+  const [quickNotificationsOpen, setQuickNotificationsOpen] = useState(false);
   const inviteAttempt = useRef("");
   const revocationHandled = useRef("");
+  const notificationIds = useRef(new Set<string>());
+  const notificationSnapshotUid = useRef("");
   const [section, setSection] = useState("Overview"),
     [tasks, setTasks] = useState<Item[]>([]),
     [commitments, setCommitments] = useState<Item[]>([]),
@@ -294,6 +292,11 @@ export default function Home() {
     [busy, setBusy] = useState(false),
     [mobileNav, setMobileNav] = useState(false),
     [toast, setToast] = useState("");
+  useEffect(() => {
+    if (!toast) return;
+    const timeout = window.setTimeout(() => setToast(""), 7000);
+    return () => window.clearTimeout(timeout);
+  }, [toast]);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All status");
   const [detectedZone, setDetectedZone] = useState("UTC");
@@ -457,10 +460,20 @@ export default function Home() {
           orderBy("createdAt", "desc"),
           limit(50),
         ),
-        (s) =>
-          setNotifications(
-            s.docs.map((d) => ({ id: d.id, ...d.data() }) as Item),
-          ),
+        (s) => {
+          const next = s.docs.map((d) => ({ id: d.id, ...d.data() }) as Item);
+          if (notificationSnapshotUid.current !== user!.uid) {
+            notificationSnapshotUid.current = user!.uid;
+            notificationIds.current = new Set(next.map((item) => item.id));
+          } else {
+            const newest = next.find(
+              (item) => !item.read && !notificationIds.current.has(item.id),
+            );
+            if (newest) setToast(`${newest.title}: ${newest.body}`);
+            notificationIds.current = new Set(next.map((item) => item.id));
+          }
+          setNotifications(next);
+        },
       ),
       onSnapshot(doc(db, "users", user!.uid), (s) => {
         const nextProfile = s.data() || {};
@@ -726,7 +739,6 @@ export default function Home() {
     setPriority("Medium");
     setDescription("");
     setTaskOwnerUid(user?.uid || "");
-    setAttendeeEmails("");
     setMeetingStart("");
     setMeetingEnd("");
     setScheduleMeetingOnCreate(false);
@@ -929,29 +941,15 @@ export default function Home() {
       return;
     setBusy(true);
     try {
-      const meeting = await scheduleGoogleMeeting({
-        title: `FounderOS · ${selectedTask.title}`,
-        description: selectedTask.description || selectedTask.title,
-        start: toUtcInstant(meetingStart, zone),
-        end: toUtcInstant(meetingEnd, zone),
-        timezone: zone,
-        attendeeEmails: attendeeEmails
-          .split(/[\s,;]+/)
-          .map((email) => email.trim())
-          .filter(Boolean),
-      });
       const batch = writeBatch(db);
       batch.update(doc(db, "teams", teamId, "tasks", selectedTask.id), {
-        googleCalendarEventId: meeting.eventId,
-        meetingUrl: meeting.meetUrl,
-        calendarEventUrl: meeting.htmlLink || "",
         meetingStart: toUtcInstant(meetingStart, zone),
         meetingEnd: toUtcInstant(meetingEnd, zone),
         updatedAt: serverTimestamp(),
       });
       batch.set(doc(collection(db, "teams", teamId, "activity")), {
         type: "meeting_scheduled",
-        title: "Scheduled a Google Calendar meeting",
+        title: "Scheduled a team meeting",
         detail: selectedTask.title,
         actor: user.uid,
         entityId: selectedTask.id,
@@ -960,15 +958,10 @@ export default function Home() {
       await batch.commit();
       setSelectedTask({
         ...selectedTask,
-        meetingUrl: meeting.meetUrl,
-        calendarEventUrl: meeting.htmlLink || "",
-        googleCalendarEventId: meeting.eventId,
+        meetingStart: toUtcInstant(meetingStart, zone),
+        meetingEnd: toUtcInstant(meetingEnd, zone),
       });
-      setToast(
-        meeting.meetUrl
-          ? "Google Calendar meeting scheduled"
-          : "Calendar event scheduled; Meet link is still being prepared",
-      );
+      setToast("Team meeting scheduled");
     } catch (error) {
       setToast(
         error instanceof Error
@@ -993,20 +986,7 @@ export default function Home() {
       return;
     setBusy(true);
     try {
-      let calendarAccessToken: string | undefined;
-      if (modal === "task" && scheduleMeetingOnCreate) {
-        try {
-          calendarAccessToken = await requestGoogleCalendarAccess();
-        } catch (error) {
-          setToast(
-            error instanceof Error
-              ? `Task not saved. ${error.message}`
-              : "Task not saved because Google Calendar access was not granted.",
-          );
-          return;
-        }
-      }
-      const createdId = await addItem(
+      await addItem(
         teamId,
         modal === "commitment"
           ? "commitments"
@@ -1050,73 +1030,21 @@ export default function Home() {
                       dueAt: toUtcInstant(due, zone),
                       timezone: zone,
                     }),
+                ...(modal === "task" && scheduleMeetingOnCreate
+                  ? {
+                      meetingStart: toUtcInstant(meetingStart, zone),
+                      meetingEnd: toUtcInstant(meetingEnd, zone),
+                    }
+                  : {}),
               },
         user.uid,
       );
       setModal("");
       if (modal === "task" && scheduleMeetingOnCreate) {
-        try {
-          const meetingAttendees = attendeeEmails
-            .split(/[\s,;]+/)
-            .map((email) => email.trim())
-            .filter(Boolean);
-          const assigneeEmail = members.find(
-            (member) => member.id === taskOwnerUid,
-          )?.email;
-          if (
-            assigneeEmail &&
-            assigneeEmail.toLowerCase() !== user.email?.toLowerCase() &&
-            !meetingAttendees.some(
-              (email) => email.toLowerCase() === assigneeEmail.toLowerCase(),
-            )
-          ) {
-            meetingAttendees.push(assigneeEmail);
-          }
-          const meeting = await scheduleGoogleMeeting(
-            {
-              title: `FounderOS · ${title.trim()}`,
-              description: description.trim() || title.trim(),
-              start: toUtcInstant(meetingStart, zone),
-              end: toUtcInstant(meetingEnd, zone),
-              timezone: zone,
-              attendeeEmails: meetingAttendees,
-            },
-            calendarAccessToken,
-          );
-          const batch = writeBatch(db);
-          batch.update(doc(db, "teams", teamId, "tasks", createdId), {
-            googleCalendarEventId: meeting.eventId,
-            meetingUrl: meeting.meetUrl,
-            calendarEventUrl: meeting.htmlLink || "",
-            meetingStart: toUtcInstant(meetingStart, zone),
-            meetingEnd: toUtcInstant(meetingEnd, zone),
-            updatedAt: serverTimestamp(),
-          });
-          batch.set(doc(collection(db, "teams", teamId, "activity")), {
-            type: "meeting_scheduled",
-            title: "Scheduled a Google Calendar meeting",
-            detail: title.trim(),
-            actor: user.uid,
-            entityId: createdId,
-            createdAt: serverTimestamp(),
-          });
-          await batch.commit();
-          setToast(
-            meeting.meetUrl
-              ? "Task and Google Meet scheduled"
-              : "Task saved; Calendar event created and Meet link is still being prepared",
-          );
-        } catch (error) {
-          setToast(
-            error instanceof Error
-              ? `Task saved, but the meeting was not scheduled: ${error.message}`
-              : "Task saved, but the meeting was not scheduled.",
-          );
-        }
+        setToast("Task and team meeting scheduled");
       } else {
         setToast("Saved to your workspace");
       }
-      setTimeout(() => setToast(""), 2400);
     } catch {
       setToast("Could not save. Try again.");
     } finally {
@@ -1146,7 +1074,6 @@ export default function Home() {
       setTimezoneDraft(timezone);
       setTimezonePrompt(null);
       setToast("Timezone preference saved");
-      setTimeout(() => setToast(""), 2400);
     } catch {
       setToast("Could not save your timezone. Try again.");
     }
@@ -1620,7 +1547,18 @@ export default function Home() {
             <span>Founder workspace</span>
           </div>
         </section>
-        {toast && <div className="toast">{toast}</div>}
+        {toast && (
+          <div className="toast" role="status" aria-live="polite">
+            {toast}
+            <button
+              className="toast-dismiss"
+              aria-label="Dismiss notification"
+              onClick={() => setToast("")}
+            >
+              <X size={15} />
+            </button>
+          </div>
+        )}
       </main>
     );
 
@@ -2020,17 +1958,77 @@ export default function Home() {
             >
               <Activity size={17} />
             </button>
-            <button
-              className="icon-button notification-trigger"
-              aria-label={`${unreadNotifications} unread notifications`}
-              title="Notifications"
-              onClick={() => setSection("Notifications")}
-            >
-              <Bell size={17} />
-              {unreadNotifications > 0 && (
-                <i>{Math.min(unreadNotifications, 99)}</i>
+            <div className="notification-menu">
+              <button
+                className="icon-button notification-trigger"
+                aria-label={`${unreadNotifications} unread notifications`}
+                aria-expanded={quickNotificationsOpen}
+                aria-controls="quick-notifications"
+                title="Notifications"
+                onClick={() => setQuickNotificationsOpen((isOpen) => !isOpen)}
+              >
+                <Bell size={17} />
+                {unreadNotifications > 0 && (
+                  <i>{Math.min(unreadNotifications, 99)}</i>
+                )}
+              </button>
+              {quickNotificationsOpen && (
+                <div
+                  className="notification-popover"
+                  id="quick-notifications"
+                  role="dialog"
+                  aria-label="Quick notifications"
+                >
+                  <div className="notification-popover-heading">
+                    <b>Quick notifications</b>
+                    <button
+                      className="icon-button"
+                      aria-label="Close quick notifications"
+                      onClick={() => setQuickNotificationsOpen(false)}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                  {notifications.slice(0, 5).map((notification) => (
+                    <button
+                      className={`quick-notification-item ${notification.read ? "read" : "unread"}`}
+                      key={notification.id}
+                      onClick={() => {
+                        void markNotificationRead(notification);
+                        const task = tasks.find(
+                          (item) => item.id === notification.targetId,
+                        );
+                        if (task) {
+                          setSelectedTask(task);
+                          setDescription(task.description || "");
+                        }
+                        setQuickNotificationsOpen(false);
+                      }}
+                    >
+                      <span className="notification-dot" />
+                      <span>
+                        <b>{notification.title}</b>
+                        <small>{notification.body}</small>
+                      </span>
+                    </button>
+                  ))}
+                  {!notifications.length && (
+                    <p className="quick-notification-empty">
+                      You’re all caught up.
+                    </p>
+                  )}
+                  <button
+                    className="quick-notification-all"
+                    onClick={() => {
+                      setQuickNotificationsOpen(false);
+                      setSection("Notifications");
+                    }}
+                  >
+                    View all notifications <ArrowRight size={13} />
+                  </button>
+                </div>
               )}
-            </button>
+            </div>
             <button className="help-button" onClick={() => setSection("Help")}>
               <CircleHelp size={16} />
               <span>Help</span>
@@ -2064,7 +2062,7 @@ export default function Home() {
                     : section === "Team"
                       ? "Invite teammates and manage workspace roles."
                       : section === "Meetings"
-                        ? "Schedule Google Calendar meetings from the tasks your team is doing."
+                        ? "Schedule meetings directly from the tasks your team is doing."
                         : `Keep ${section.toLowerCase()} clear and moving forward.`}
               </p>
             </div>
@@ -2778,7 +2776,7 @@ export default function Home() {
                     onClick={() => {
                       setSection("Meetings");
                       setToast(
-                        "Select a task to create a Google Calendar event for this time.",
+                        "Select a task to schedule a team meeting for this time.",
                       );
                     }}
                   >
@@ -3525,10 +3523,10 @@ export default function Home() {
             </div>
           ) : section === "Meetings" ? (
             <div className="panel simple-panel">
-              <div className="panel-kicker">GOOGLE CALENDAR</div>
+              <div className="panel-kicker">TEAM CALENDAR</div>
               <h2>Team meetings</h2>
               <p className="meetings-intro">
-                Google Calendar meetings linked to team tasks, shown in {zone}.
+                Meetings scheduled from team tasks, shown in {zone}.
               </p>
               {scheduledMeetings.map((meeting) => (
                 <div className="settings-line" key={meeting.id}>
@@ -3576,7 +3574,7 @@ export default function Home() {
               {!scheduledMeetings.length && (
                 <Empty
                   title="No team meetings yet."
-                  text="Open a task to schedule a Google Calendar meeting and invite attendees."
+                  text="Open a task to add a meeting time to your team calendar."
                 />
               )}
             </div>
@@ -3696,7 +3694,6 @@ export default function Home() {
                       onClick={() => {
                         setSelectedTask(item);
                         setDescription(item.description || "");
-                        setAttendeeEmails("");
                         setMeetingStart("");
                         setMeetingEnd("");
                         setReplyTo(null);
@@ -3844,9 +3841,9 @@ export default function Home() {
                     }
                   />
                   <span>
-                    <b>Add a Google Meet</b>
+                    <b>Schedule a meeting</b>
                     <small>
-                      Schedule a Calendar invite when you save this task.
+                      Add the meeting to your team calendar when you save.
                     </small>
                   </span>
                 </label>
@@ -3874,19 +3871,9 @@ export default function Home() {
                         />
                       </label>
                     </div>
-                    <label>
-                      Invite teammates by email
-                      <input
-                        value={attendeeEmails}
-                        onChange={(event) =>
-                          setAttendeeEmails(event.target.value)
-                        }
-                        placeholder="name@company.com, teammate@company.com"
-                      />
-                    </label>
                     <small className="form-hint">
-                      The task owner is invited automatically when they are not
-                      you. Google may ask you to approve Calendar access.
+                      Team members can see it in the Meetings and Calendar
+                      views.
                     </small>
                     {meetingStart &&
                       meetingEnd &&
@@ -3993,11 +3980,11 @@ export default function Home() {
                 </button>
               )}
               <section className="meeting-card">
-                <div className="panel-kicker">GOOGLE CALENDAR</div>
+                <div className="panel-kicker">TEAM CALENDAR</div>
                 <h3>Schedule a team meeting</h3>
                 <p>
-                  Creates a Calendar event, sends attendee invitations, and
-                  requests a Google Meet link.
+                  Set the time here; teammates can see it in the Meetings and
+                  Calendar views.
                 </p>
                 {selectedTask.meetingUrl && (
                   <a
@@ -4043,16 +4030,6 @@ export default function Home() {
                         />
                       </label>
                     </div>
-                    <label>
-                      Attendee emails{" "}
-                      <input
-                        value={attendeeEmails}
-                        onChange={(event) =>
-                          setAttendeeEmails(event.target.value)
-                        }
-                        placeholder="name@company.com, teammate@company.com"
-                      />
-                    </label>
                     <button
                       className="primary-button"
                       disabled={
@@ -4064,7 +4041,7 @@ export default function Home() {
                       }
                       onClick={createMeeting}
                     >
-                      {busy ? "Scheduling…" : "Connect Google & schedule"}{" "}
+                      {busy ? "Scheduling…" : "Schedule meeting"}{" "}
                       <ArrowRight size={14} />
                     </button>
                   </>
@@ -4171,9 +4148,16 @@ export default function Home() {
         </div>
       )}
       {toast && (
-        <div className="toast">
+        <div className="toast" role="status" aria-live="polite">
           <Check size={15} />
           {toast}
+          <button
+            className="toast-dismiss"
+            aria-label="Dismiss notification"
+            onClick={() => setToast("")}
+          >
+            <X size={15} />
+          </button>
         </div>
       )}
     </div>

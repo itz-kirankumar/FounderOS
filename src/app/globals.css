@@ -1614,6 +1614,80 @@ a {
 .notification-row.read .notification-dot {
   background: #d5ddd5;
 }
+.notification-menu {
+  position: relative;
+}
+.notification-popover {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 10px);
+  right: 0;
+  width: min(340px, calc(100vw - 32px));
+  padding: 12px;
+  border: 1px solid var(--line, #e4e9e3);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 14px 36px #1c33242b;
+}
+.notification-popover-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 0 6px 4px;
+  color: var(--ink, #28352b);
+  font-size: 11px;
+}
+.notification-popover-heading .icon-button {
+  width: 28px;
+  height: 28px;
+}
+.quick-notification-item {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 5px;
+  border: 0;
+  border-bottom: 1px solid var(--line, #e4e9e3);
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+.quick-notification-item > span:nth-child(2) {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.quick-notification-item b {
+  color: var(--ink, #28352b);
+  font-size: 10px;
+}
+.quick-notification-item small,
+.quick-notification-empty {
+  color: var(--muted, #68756b);
+  font-size: 9px;
+  line-height: 1.45;
+}
+.quick-notification-item.read .notification-dot {
+  background: #d5ddd5;
+}
+.quick-notification-all {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 11px 5px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--green, #315e40);
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.quick-notification-empty {
+  margin: 10px 4px;
+}
 
 @media (max-width: 700px) {
   .availability-form {
@@ -1754,6 +1828,22 @@ a {
   color: #f1faf2;
   box-shadow: 0 5px 20px #26392d35;
   font-size: 11px;
+}
+.toast-dismiss {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: -3px -6px -3px 2px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.toast-dismiss:hover {
+  background: #ffffff1f;
 }
 .scrim,
 .mobile-close,
@@ -2147,6 +2237,9 @@ a {
   opacity: 0.5;
 }
 @media (max-width: 700px) {
+  .notification-popover {
+    right: -45px;
+  }
   .setup-shell {
     padding: 16px;
   }

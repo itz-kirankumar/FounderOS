@@ -47,7 +47,8 @@ service cloud.firestore {
         ])
         && request.resource.data.keys().hasOnly([
           'title', 'description', 'status', 'priority', 'ownerUid', 'projectId',
-          'startDate', 'dueAt', 'timezone', 'tags', 'createdBy', 'createdAt', 'updatedAt'
+          'startDate', 'dueAt', 'timezone', 'tags', 'meetingStart', 'meetingEnd',
+          'createdBy', 'createdAt', 'updatedAt'
         ])
         && request.resource.data.title is string
         && request.resource.data.title.size() > 0
@@ -61,6 +62,14 @@ service cloud.firestore {
         && (!('description' in request.resource.data)
           || (request.resource.data.description is string
             && request.resource.data.description.size() <= 5000))
+        && (!('meetingStart' in request.resource.data)
+          || (request.resource.data.meetingStart is timestamp
+            && 'meetingEnd' in request.resource.data))
+        && (!('meetingEnd' in request.resource.data)
+          || (request.resource.data.meetingEnd is timestamp
+            && 'meetingStart' in request.resource.data))
+        && (!('meetingStart' in request.resource.data)
+          || request.resource.data.meetingEnd > request.resource.data.meetingStart)
         && validCreatedRecord();
     }
 
@@ -287,8 +296,14 @@ service cloud.firestore {
           && (!('calendarEventUrl' in request.resource.data)
             || (request.resource.data.calendarEventUrl is string
               && (request.resource.data.calendarEventUrl == '' || request.resource.data.calendarEventUrl.matches('https://calendar\\.google\\.com/.*'))))
-          && (!('meetingStart' in request.resource.data) || request.resource.data.meetingStart is timestamp)
-          && (!('meetingEnd' in request.resource.data) || request.resource.data.meetingEnd is timestamp)
+          && (!('meetingStart' in request.resource.data)
+            || (request.resource.data.meetingStart is timestamp
+              && 'meetingEnd' in request.resource.data))
+          && (!('meetingEnd' in request.resource.data)
+            || (request.resource.data.meetingEnd is timestamp
+              && 'meetingStart' in request.resource.data))
+          && (!('meetingStart' in request.resource.data)
+            || request.resource.data.meetingEnd > request.resource.data.meetingStart)
           && (!('completedAt' in request.resource.data) || request.resource.data.completedAt == null || request.resource.data.completedAt is timestamp);
         allow delete: if false;
 
