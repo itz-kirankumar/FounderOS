@@ -1,14 +1,7 @@
 import { GoogleAuthProvider, reauthenticateWithPopup } from "firebase/auth";
 import { auth } from "./firebase";
 
-export async function scheduleGoogleMeeting(input: {
-  title: string;
-  description: string;
-  start: Date;
-  end: Date;
-  timezone: string;
-  attendeeEmails: string[];
-}) {
+export async function requestGoogleCalendarAccess() {
   const provider = new GoogleAuthProvider();
   provider.addScope("https://www.googleapis.com/auth/calendar.events");
   provider.setCustomParameters({ prompt: "consent" });
@@ -23,13 +16,28 @@ export async function scheduleGoogleMeeting(input: {
       "Google did not grant Calendar access. Try connecting again.",
     );
   }
+  return accessToken;
+}
+
+export async function scheduleGoogleMeeting(
+  input: {
+    title: string;
+    description: string;
+    start: Date;
+    end: Date;
+    timezone: string;
+    attendeeEmails: string[];
+  },
+  accessToken?: string,
+) {
+  const calendarToken = accessToken || (await requestGoogleCalendarAccess());
 
   const response = await fetch(
     "https://www.googleapis.com/calendar/v3/calendars/primary/events?conferenceDataVersion=1&sendUpdates=all",
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${calendarToken}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -71,7 +79,7 @@ export async function scheduleGoogleMeeting(input: {
     await new Promise((resolve) => setTimeout(resolve, 800));
     const refresh = await fetch(
       `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(event.id)}?conferenceDataVersion=1`,
-      { headers: { Authorization: `Bearer ${accessToken}` } },
+      { headers: { Authorization: `Bearer ${calendarToken}` } },
     );
     if (refresh.ok) event = await refresh.json();
   }

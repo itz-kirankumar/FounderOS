@@ -24,6 +24,12 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/teams/$(teamId)/members/$(request.auth.uid)).data.role in ['Owner', 'Admin', 'Member'];
     }
 
+    function commentEmailMatchesAuth() {
+      return request.resource.data.authorEmail == (
+        'email' in request.auth.token ? request.auth.token.email : ''
+      );
+    }
+
     function validInviteRole(teamId, role) {
       return role in ['Admin', 'Member', 'Viewer']
         && (isOwner(teamId) || (isAdmin(teamId) && role in ['Member', 'Viewer']));
@@ -303,7 +309,7 @@ service cloud.firestore {
           allow read: if isMember(teamId);
           allow create: if canContribute(teamId)
             && request.resource.data.authorUid == request.auth.uid
-            && request.resource.data.authorEmail == request.auth.token.email
+            && commentEmailMatchesAuth()
             && request.resource.data.body is string
             && request.resource.data.body.size() > 0
             && request.resource.data.body.size() <= 5000

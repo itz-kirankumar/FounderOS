@@ -74,7 +74,10 @@ import {
   createInvitation,
   type TeamRole,
 } from "@/lib/data";
-import { scheduleGoogleMeeting } from "@/lib/google-calendar";
+import {
+  requestGoogleCalendarAccess,
+  scheduleGoogleMeeting,
+} from "@/lib/google-calendar";
 import {
   dateKeyInTimezone,
   detectBrowserTimezone,
@@ -258,6 +261,7 @@ export default function Home() {
   const [attendeeEmails, setAttendeeEmails] = useState("");
   const [meetingStart, setMeetingStart] = useState("");
   const [meetingEnd, setMeetingEnd] = useState("");
+  const [scheduleMeetingOnCreate, setScheduleMeetingOnCreate] = useState(false);
   const inviteAttempt = useRef("");
   const revocationHandled = useRef("");
   const [section, setSection] = useState("Overview"),
@@ -722,6 +726,10 @@ export default function Home() {
     setPriority("Medium");
     setDescription("");
     setTaskOwnerUid(user?.uid || "");
+    setAttendeeEmails("");
+    setMeetingStart("");
+    setMeetingEnd("");
+    setScheduleMeetingOnCreate(false);
     setModal(kind);
   };
   const dismissInvite = () => {
@@ -975,9 +983,30 @@ export default function Home() {
     if (memberRole === "Viewer") return;
     if (!title.trim() || !teamId || !user || (modal !== "project" && !due))
       return;
+    if (
+      modal === "task" &&
+      scheduleMeetingOnCreate &&
+      (!meetingStart ||
+        !meetingEnd ||
+        toUtcInstant(meetingEnd, zone) <= toUtcInstant(meetingStart, zone))
+    )
+      return;
     setBusy(true);
     try {
-      await addItem(
+      let calendarAccessToken: string | undefined;
+      if (modal === "task" && scheduleMeetingOnCreate) {
+        try {
+          calendarAccessToken = await requestGoogleCalendarAccess();
+        } catch (error) {
+          setToast(
+            error instanceof Error
+              ? `Task not saved. ${error.message}`
+              : "Task not saved because Google Calendar access was not granted.",
+          );
+          return;
+        }
+      }
+      const createdId = await addItem(
         teamId,
         modal === "commitment"
           ? "commitments"
@@ -1025,7 +1054,68 @@ export default function Home() {
         user.uid,
       );
       setModal("");
-      setToast("Saved to your workspace");
+      if (modal === "task" && scheduleMeetingOnCreate) {
+        try {
+          const meetingAttendees = attendeeEmails
+            .split(/[\s,;]+/)
+            .map((email) => email.trim())
+            .filter(Boolean);
+          const assigneeEmail = members.find(
+            (member) => member.id === taskOwnerUid,
+          )?.email;
+          if (
+            assigneeEmail &&
+            assigneeEmail.toLowerCase() !== user.email?.toLowerCase() &&
+            !meetingAttendees.some(
+              (email) => email.toLowerCase() === assigneeEmail.toLowerCase(),
+            )
+          ) {
+            meetingAttendees.push(assigneeEmail);
+          }
+          const meeting = await scheduleGoogleMeeting(
+            {
+              title: `FounderOS · ${title.trim()}`,
+              description: description.trim() || title.trim(),
+              start: toUtcInstant(meetingStart, zone),
+              end: toUtcInstant(meetingEnd, zone),
+              timezone: zone,
+              attendeeEmails: meetingAttendees,
+            },
+            calendarAccessToken,
+          );
+          const batch = writeBatch(db);
+          batch.update(doc(db, "teams", teamId, "tasks", createdId), {
+            googleCalendarEventId: meeting.eventId,
+            meetingUrl: meeting.meetUrl,
+            calendarEventUrl: meeting.htmlLink || "",
+            meetingStart: toUtcInstant(meetingStart, zone),
+            meetingEnd: toUtcInstant(meetingEnd, zone),
+            updatedAt: serverTimestamp(),
+          });
+          batch.set(doc(collection(db, "teams", teamId, "activity")), {
+            type: "meeting_scheduled",
+            title: "Scheduled a Google Calendar meeting",
+            detail: title.trim(),
+            actor: user.uid,
+            entityId: createdId,
+            createdAt: serverTimestamp(),
+          });
+          await batch.commit();
+          setToast(
+            meeting.meetUrl
+              ? "Task and Google Meet scheduled"
+              : "Task saved; Calendar event created and Meet link is still being prepared",
+          );
+        } catch (error) {
+          setToast(
+            error instanceof Error
+              ? `Task saved, but the meeting was not scheduled: ${error.message}`
+              : "Task saved, but the meeting was not scheduled.",
+          );
+        }
+      } else {
+        setToast("Saved to your workspace");
+      }
       setTimeout(() => setToast(""), 2400);
     } catch {
       setToast("Could not save. Try again.");
@@ -3739,6 +3829,73 @@ export default function Home() {
                 </select>
               </label>
             )}
+            {modal === "task" && (
+              <section className="task-meeting-create">
+                <label className="meeting-create-toggle">
+                  <input
+                    type="checkbox"
+                    checked={scheduleMeetingOnCreate}
+                    onChange={(event) =>
+                      setScheduleMeetingOnCreate(event.target.checked)
+                    }
+                  />
+                  <span>
+                    <b>Add a Google Meet</b>
+                    <small>
+                      Schedule a Calendar invite when you save this task.
+                    </small>
+                  </span>
+                </label>
+                {scheduleMeetingOnCreate && (
+                  <div className="meeting-create-fields">
+                    <div className="meeting-times">
+                      <label>
+                        Starts ({zone})
+                        <input
+                          type="datetime-local"
+                          value={meetingStart}
+                          onChange={(event) =>
+                            setMeetingStart(event.target.value)
+                          }
+                        />
+                      </label>
+                      <label>
+                        Ends ({zone})
+                        <input
+                          type="datetime-local"
+                          value={meetingEnd}
+                          onChange={(event) =>
+                            setMeetingEnd(event.target.value)
+                          }
+                        />
+                      </label>
+                    </div>
+                    <label>
+                      Invite teammates by email
+                      <input
+                        value={attendeeEmails}
+                        onChange={(event) =>
+                          setAttendeeEmails(event.target.value)
+                        }
+                        placeholder="name@company.com, teammate@company.com"
+                      />
+                    </label>
+                    <small className="form-hint">
+                      The task owner is invited automatically when they are not
+                      you. Google may ask you to approve Calendar access.
+                    </small>
+                    {meetingStart &&
+                      meetingEnd &&
+                      toUtcInstant(meetingEnd, zone) <=
+                        toUtcInstant(meetingStart, zone) && (
+                        <small className="form-hint meeting-error">
+                          Choose an end time after the meeting start.
+                        </small>
+                      )}
+                  </div>
+                )}
+              </section>
+            )}
             <div className="modal-actions">
               <button className="secondary-button" onClick={() => setModal("")}>
                 Cancel
@@ -3746,15 +3903,30 @@ export default function Home() {
               <button
                 className="primary-button"
                 disabled={
-                  !title.trim() || busy || (modal !== "project" && !due)
+                  !title.trim() ||
+                  busy ||
+                  (modal !== "project" && !due) ||
+                  (modal === "task" &&
+                    scheduleMeetingOnCreate &&
+                    (!meetingStart ||
+                      !meetingEnd ||
+                      toUtcInstant(meetingEnd, zone) <=
+                        toUtcInstant(meetingStart, zone)))
                 }
                 onClick={create}
               >
                 {busy ? (
-                  "Saving…"
+                  scheduleMeetingOnCreate && modal === "task" ? (
+                    "Saving task and meeting…"
+                  ) : (
+                    "Saving…"
+                  )
                 ) : (
                   <>
-                    Save {modal} <ArrowRight size={14} />
+                    {scheduleMeetingOnCreate && modal === "task"
+                      ? "Save task & schedule meeting"
+                      : `Save ${modal}`}{" "}
+                    <ArrowRight size={14} />
                   </>
                 )}
               </button>
