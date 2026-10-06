@@ -10,6 +10,7 @@ import {
 } from "firebase/auth";
 import {
   collection,
+  deleteField,
   doc,
   getDoc,
   limit,
@@ -20,6 +21,12 @@ import {
   updateDoc,
   writeBatch,
 } from "firebase/firestore";
+import {
+  deleteObject,
+  getDownloadURL,
+  ref as storageRef,
+  uploadBytes,
+} from "firebase/storage";
 import {
   Activity,
   ArrowRight,
@@ -52,6 +59,7 @@ import {
   firebaseMissing,
   firebaseReady,
   isFirebaseEmulator,
+  storage,
 } from "@/lib/firebase";
 import { addItem, changeTask, ensureWorkspace, type Item } from "@/lib/data";
 import {
@@ -153,6 +161,7 @@ export default function Home() {
   const [memberRole, setMemberRole] = useState<TeamRole>("Member");
   const [teamName, setTeamName] = useState("");
   const [company, setCompany] = useState<Item | null>(null);
+  const [companyLogoUrl, setCompanyLogoUrl] = useState("");
   const [companyDraft, setCompanyDraft] = useState({
     name: "",
     legalName: "",
@@ -399,7 +408,31 @@ export default function Home() {
       region: company.region || "",
       defaultTimezone: company.defaultTimezone || company.timezone || zone,
     });
-  }, [company, zone]);
+  }, [
+    company?.name,
+    company?.legalName,
+    company?.website,
+    company?.industry,
+    company?.stage,
+    company?.country,
+    company?.region,
+    company?.defaultTimezone,
+    company?.timezone,
+    zone,
+  ]);
+  useEffect(() => {
+    let active = true;
+    if (!company?.companyLogoPath) {
+      setCompanyLogoUrl("");
+      return;
+    }
+    getDownloadURL(storageRef(storage, company.companyLogoPath))
+      .then((url) => active && setCompanyLogoUrl(url))
+      .catch(() => active && setCompanyLogoUrl(""));
+    return () => {
+      active = false;
+    };
+  }, [company?.companyLogoPath, company?.companyLogoUpdatedAt]);
   useEffect(() => {
     setLocationDraft({
       country: profile?.country || "",
@@ -574,6 +607,8 @@ export default function Home() {
         teamId: nextTeamId,
         updatedAt: serverTimestamp(),
       });
+      setCompany(null);
+      setCompanyLogoUrl("");
       setTeamId(nextTeamId);
       setInviteLink("");
       setSection("Overview");
@@ -901,11 +936,64 @@ export default function Home() {
     try {
       await updateDoc(doc(db, "teams", teamId), values);
       setTeamName(values.name);
+      setWorkspaces((current) =>
+        current.map((workspace) =>
+          workspace.id === teamId
+            ? { ...workspace, name: values.name }
+            : workspace,
+        ),
+      );
       setToast("Company profile saved");
     } catch {
       setToast(
         "Could not save company profile. Check your access and connection.",
       );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const uploadCompanyLogo = async (file?: File) => {
+    if (!teamId || !canManageTeam || !file) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
+      setToast("Choose a PNG, JPG, or WebP image.");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setToast("Company logos must be 2 MB or smaller.");
+      return;
+    }
+    setBusy(true);
+    const path = `company-logos/${teamId}/logo`;
+    try {
+      await uploadBytes(storageRef(storage, path), file, {
+        contentType: file.type,
+        cacheControl: "public,max-age=3600",
+      });
+      await updateDoc(doc(db, "teams", teamId), {
+        companyLogoPath: path,
+        companyLogoUpdatedAt: serverTimestamp(),
+      });
+      setToast("Company logo updated for the whole team");
+    } catch {
+      setToast("Could not upload the logo. Check Firebase Storage is enabled.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const removeCompanyLogo = async () => {
+    if (!teamId || !canManageTeam || !company?.companyLogoPath) return;
+    setBusy(true);
+    const path = company.companyLogoPath;
+    try {
+      await updateDoc(doc(db, "teams", teamId), {
+        companyLogoPath: deleteField(),
+        companyLogoUpdatedAt: serverTimestamp(),
+      });
+      await deleteObject(storageRef(storage, path)).catch(() => undefined);
+      setCompanyLogoUrl("");
+      setToast("Company logo removed");
+    } catch {
+      setToast("Could not remove the company logo.");
     } finally {
       setBusy(false);
     }
@@ -1190,7 +1278,16 @@ export default function Home() {
       <main className="setup-shell">
         <section className="setup-card">
           <div className="brand-mark">
-            <Command size={17} />
+            {companyLogoUrl ? (
+              <img
+                className="setup-company-logo"
+                src={companyLogoUrl}
+                alt="Company logo"
+                onError={() => setCompanyLogoUrl("")}
+              />
+            ) : (
+              <Command size={17} />
+            )}
           </div>
           <div className="panel-kicker">FIRST, SET UP YOUR COMPANY</div>
           <h1>Give your team a shared home.</h1>
@@ -1260,6 +1357,42 @@ export default function Home() {
                   <option key={value}>{value}</option>
                 ))}
               </select>
+            </label>
+          </div>
+          <div className="company-logo-control">
+            <div className="company-logo-preview">
+              {companyLogoUrl ? (
+                <img
+                  src={companyLogoUrl}
+                  alt="Company logo"
+                  onError={() => setCompanyLogoUrl("")}
+                />
+              ) : (
+                <span>
+                  {companyDraft.name.trim().slice(0, 1).toUpperCase() || "C"}
+                </span>
+              )}
+            </div>
+            <div>
+              <b>Company logo</b>
+              <small>PNG, JPG, or WebP · up to 2 MB</small>
+            </div>
+            <label className="secondary-button logo-upload-button">
+              {busy
+                ? "Uploading…"
+                : companyLogoUrl
+                  ? "Replace logo"
+                  : "Upload logo"}
+              <input
+                aria-label="Upload company logo"
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                disabled={busy}
+                onChange={(event) => {
+                  void uploadCompanyLogo(event.currentTarget.files?.[0]);
+                  event.currentTarget.value = "";
+                }}
+              />
             </label>
           </div>
           <button
@@ -1348,10 +1481,28 @@ export default function Home() {
     <div className="app-shell">
       <aside className={`sidebar ${mobileNav ? "show" : ""}`}>
         <div className="sidebar-brand">
-          <div className="brand-mark">
-            <Command size={17} />
+          <div className="sidebar-company-logo">
+            {companyLogoUrl ? (
+              <img
+                src={companyLogoUrl}
+                alt={`${company?.name || teamName} logo`}
+                onError={() => setCompanyLogoUrl("")}
+              />
+            ) : (
+              <span>
+                {(company?.name || teamName || "C")
+                  .trim()
+                  .slice(0, 1)
+                  .toUpperCase()}
+              </span>
+            )}
           </div>
-          <span>FounderOS</span>
+          <span
+            className="sidebar-company-name"
+            title={company?.name || teamName}
+          >
+            {company?.name || teamName || "Your company"}
+          </span>
           <button className="mobile-close" onClick={() => setMobileNav(false)}>
             <X size={17} />
           </button>
@@ -2216,6 +2367,64 @@ export default function Home() {
                   Save company profile
                 </button>
               )}
+              <div className="settings-subheading">
+                <div className="panel-kicker">COMPANY BRAND</div>
+                <h3>Make this workspace feel like yours</h3>
+                <p>
+                  The company logo and name appear in the workspace sidebar for
+                  everyone on your team.
+                </p>
+              </div>
+              <div className="company-logo-control">
+                <div className="company-logo-preview">
+                  {companyLogoUrl ? (
+                    <img
+                      src={companyLogoUrl}
+                      alt={`${company?.name || "Company"} logo`}
+                      onError={() => setCompanyLogoUrl("")}
+                    />
+                  ) : (
+                    <span>
+                      {(company?.name || teamName || "C")
+                        .trim()
+                        .slice(0, 1)
+                        .toUpperCase()}
+                    </span>
+                  )}
+                </div>
+                <div>
+                  <b>{companyLogoUrl ? "Company logo" : "No logo uploaded"}</b>
+                  <small>PNG, JPG, or WebP · up to 2 MB</small>
+                </div>
+                {canManageTeam && (
+                  <label className="secondary-button logo-upload-button">
+                    {busy
+                      ? "Uploading…"
+                      : companyLogoUrl
+                        ? "Replace logo"
+                        : "Upload logo"}
+                    <input
+                      aria-label="Upload company logo"
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      disabled={busy}
+                      onChange={(event) => {
+                        void uploadCompanyLogo(event.currentTarget.files?.[0]);
+                        event.currentTarget.value = "";
+                      }}
+                    />
+                  </label>
+                )}
+                {canManageTeam && company?.companyLogoPath && (
+                  <button
+                    className="text-action danger-action"
+                    disabled={busy}
+                    onClick={() => void removeCompanyLogo()}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
               <div className="settings-subheading">
                 <div className="panel-kicker">YOUR TEAM PROFILE</div>
                 <h3>How teammates know you</h3>

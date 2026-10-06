@@ -92,7 +92,7 @@ service cloud.firestore {
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'name', 'timezone', 'defaultTimezone', 'companyProfileComplete', 'legalName',
-          'website', 'industry', 'stage', 'country', 'region', 'profileCompletedAt'
+          'website', 'industry', 'stage', 'country', 'region', 'profileCompletedAt', 'companyLogoPath', 'companyLogoUpdatedAt'
         ])
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0
@@ -105,6 +105,8 @@ service cloud.firestore {
         && (!('region' in request.resource.data) || (request.resource.data.region is string && request.resource.data.region.size() <= 80))
         && (!('defaultTimezone' in request.resource.data) || request.resource.data.defaultTimezone is string)
         && (!('companyProfileComplete' in request.resource.data) || request.resource.data.companyProfileComplete is bool)
+        && (!('companyLogoPath' in request.resource.data) || (request.resource.data.companyLogoPath is string && request.resource.data.companyLogoPath.size() <= 300))
+        && (!('companyLogoUpdatedAt' in request.resource.data) || request.resource.data.companyLogoUpdatedAt == request.time)
         && (!('profileCompletedAt' in request.resource.data) || request.resource.data.profileCompletedAt == request.time);
       allow delete: if false;
 

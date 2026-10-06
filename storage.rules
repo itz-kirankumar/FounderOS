@@ -1,0 +1,30 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(teamId) {
+      return signedIn()
+        && firestore.exists(/databases/(default)/documents/teams/$(teamId)/members/$(request.auth.uid));
+    }
+
+    function isAdmin(teamId) {
+      return isMember(teamId)
+        && firestore.get(/databases/(default)/documents/teams/$(teamId)/members/$(request.auth.uid)).data.role in ['Owner', 'Admin'];
+    }
+
+    match /company-logos/{teamId}/logo {
+      allow read: if isMember(teamId);
+      allow create, update: if isAdmin(teamId)
+        && request.resource.size <= 2 * 1024 * 1024
+        && request.resource.contentType.matches('image/(png|jpeg|webp)');
+      allow delete: if isAdmin(teamId);
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

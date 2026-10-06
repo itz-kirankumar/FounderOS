@@ -25,13 +25,13 @@ Open `http://localhost:3000`. Choose **Continue with local demo** to use the Aut
 1. Create a Firebase project and a Web App in the Firebase console.
 2. Enable Google under **Authentication → Sign-in method**.
 3. Add every production hostname under **Authentication → Settings → Authorized domains**.
-4. Create the Cloud Firestore database.
-5. Set the Web App configuration as build-time environment variables using the names in `.env.example`. Set `NEXT_PUBLIC_USE_FIREBASE_EMULATOR=false` or leave it unset in production. `NEXT_PUBLIC_*` values are embedded in the browser bundle at build time, so configure them in the deployment provider before building.
+4. Create the Cloud Firestore database and a Cloud Storage bucket.
+5. Set the Web App configuration as build-time environment variables using the names in `.env.example`, including `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`. Set `NEXT_PUBLIC_USE_FIREBASE_EMULATOR=false` or leave it unset in production. `NEXT_PUBLIC_*` values are embedded in the browser bundle at build time, so configure them in the deployment provider before building.
 6. Restrict the Firebase API key to the required APIs and application domains in Google Cloud. Firebase Web configuration is public client configuration; never put a service-account key or Admin SDK credential in this app or in a `NEXT_PUBLIC_*` variable.
-7. Deploy the Firestore rules and indexes to the intended project:
+7. Deploy the Firestore rules, Storage rules, and indexes to the intended project:
 
 ```powershell
-firebase deploy --only firestore:rules,firestore:indexes --project YOUR_FIREBASE_PROJECT_ID
+firebase deploy --only firestore:rules,firestore:indexes,storage --project YOUR_FIREBASE_PROJECT_ID
 ```
 
 The checked-in `.firebaserc` deliberately points to the emulator demo project. Always pass the real project ID explicitly for cloud commands.
