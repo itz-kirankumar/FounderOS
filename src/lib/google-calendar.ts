@@ -90,3 +90,114 @@ export async function scheduleGoogleMeeting(
     htmlLink: event.htmlLink as string,
   };
 }
+
+export async function updateGoogleMeeting(
+  eventId: string,
+  input: {
+    title: string;
+    description: string;
+    start: Date;
+    end: Date;
+    timezone: string;
+    attendeeEmails?: string[];
+  },
+  accessToken: string,
+) {
+  const response = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}?conferenceDataVersion=1&sendUpdates=all`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        summary: input.title,
+        description: input.description,
+        start: {
+          dateTime: input.start.toISOString(),
+          timeZone: input.timezone,
+        },
+        end: { dateTime: input.end.toISOString(), timeZone: input.timezone },
+        ...(input.attendeeEmails?.length
+          ? { attendees: input.attendeeEmails.map((email) => ({ email })) }
+          : {}),
+      }),
+    },
+  );
+  const event = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(
+      typeof event?.error?.message === "string"
+        ? event.error.message
+        : "Google Calendar could not update this meeting.",
+    );
+  }
+  let current = event;
+  const getMeetUrl = (calendarEvent: typeof event) =>
+    calendarEvent.hangoutLink ||
+    calendarEvent.conferenceData?.entryPoints?.find(
+      (entry: { entryPointType?: string; uri?: string }) =>
+        entry.entryPointType === "video" && entry.uri,
+    )?.uri;
+  if (!getMeetUrl(current)) {
+    const refreshed = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}?conferenceDataVersion=1`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+    if (refreshed.ok) current = await refreshed.json();
+  }
+  return {
+    eventId: eventId,
+    meetUrl: (getMeetUrl(current) || "") as string,
+    htmlLink: current.htmlLink as string,
+  };
+}
+
+export async function getGoogleMeeting(eventId: string, accessToken: string) {
+  const response = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}?conferenceDataVersion=1`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  const event = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(
+      typeof event?.error?.message === "string"
+        ? event.error.message
+        : "Google Calendar could not load this meeting.",
+    );
+  }
+  const meetUrl =
+    event.hangoutLink ||
+    event.conferenceData?.entryPoints?.find(
+      (entry: { entryPointType?: string; uri?: string }) =>
+        entry.entryPointType === "video" && entry.uri,
+    )?.uri ||
+    "";
+  return {
+    eventId,
+    meetUrl: meetUrl as string,
+    htmlLink: event.htmlLink as string,
+  };
+}
+
+export async function deleteGoogleMeeting(
+  eventId: string,
+  accessToken: string,
+) {
+  const response = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=all`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+  );
+  if (!response.ok && response.status !== 404 && response.status !== 410) {
+    const result = await response.json().catch(() => ({}));
+    throw new Error(
+      typeof result?.error?.message === "string"
+        ? result.error.message
+        : "Google Calendar could not remove this meeting.",
+    );
+  }
+}

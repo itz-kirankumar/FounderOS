@@ -222,6 +222,7 @@ export async function addTaskComment(
   author: { uid: string; name: string; email: string },
   body: string,
   parentId?: string,
+  mentionedUids: string[] = [],
 ) {
   const taskRef = doc(db, "teams", teamId, "tasks", taskId);
   const taskSnapshot = await getDoc(taskRef);
@@ -237,6 +238,7 @@ export async function addTaskComment(
     authorEmail: author.email,
     body: body.trim(),
     ...(parentId ? { parentId } : {}),
+    ...(mentionedUids.length ? { mentionedUids } : {}),
     createdAt: serverTimestamp(),
   });
   batch.set(doc(collection(db, "teams", teamId, "activity")), {
@@ -247,25 +249,50 @@ export async function addTaskComment(
     entityId: taskId,
     createdAt: serverTimestamp(),
   });
-  const recipientUids = Array.from(
+  const taskRecipients = Array.from(
     new Set([task.ownerUid, task.createdBy]),
   ).filter((uid) => typeof uid === "string" && uid !== author.uid);
-  for (const recipientUid of recipientUids) {
-    batch.set(doc(collection(db, "users", recipientUid, "notifications")), {
-      teamId,
+  const mentionRecipients = Array.from(new Set(mentionedUids)).filter(
+    (uid) => uid !== author.uid && !taskRecipients.includes(uid),
+  );
+  const notificationRecords: {
+    recipientUid: string;
+    type: "task_comment" | "task_mention";
+    title: string;
+  }[] = [];
+  for (const recipientUid of taskRecipients) {
+    notificationRecords.push({
       recipientUid,
       type: "task_comment",
       title: "New reply in a task discussion",
-      body: `${author.name || "A teammate"}: ${body.trim().slice(0, 300)}`,
-      actorUid: author.uid,
-      targetType: "task",
-      targetId: taskId,
-      commentId: commentRef.id,
-      read: false,
-      createdAt: serverTimestamp(),
+    });
+  }
+  for (const recipientUid of mentionRecipients) {
+    notificationRecords.push({
+      recipientUid,
+      type: "task_mention",
+      title: "You were mentioned in a task thread",
     });
   }
   await batch.commit();
+  const results = await Promise.allSettled(
+    notificationRecords.map(({ recipientUid, type, title }) =>
+      setDoc(doc(collection(db, "users", recipientUid, "notifications")), {
+        teamId,
+        recipientUid,
+        type,
+        title,
+        body: `${author.name || "A teammate"}: ${body.trim().slice(0, 300)}`,
+        actorUid: author.uid,
+        targetType: "task",
+        targetId: taskId,
+        commentId: commentRef.id,
+        read: false,
+        createdAt: serverTimestamp(),
+      }),
+    ),
+  );
+  return results.some((result) => result.status === "rejected");
 }
 export async function ensureWorkspace(
   uid: string,

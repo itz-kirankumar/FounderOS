@@ -94,7 +94,7 @@ service cloud.firestore {
           && request.resource.data.teamId is string
           && isMember(request.resource.data.teamId)
           && exists(/databases/$(database)/documents/teams/$(request.resource.data.teamId)/members/$(userId))
-          && request.resource.data.type in ['task_assigned', 'task_comment']
+          && request.resource.data.type in ['task_assigned', 'task_comment', 'task_mention']
           && request.resource.data.targetType == 'task'
           && request.resource.data.targetId is string
           && request.resource.data.title is string
@@ -115,7 +115,13 @@ service cloud.firestore {
                 || getAfter(/databases/$(database)/documents/teams/$(request.resource.data.teamId)/tasks/$(request.resource.data.targetId)).data.createdBy == userId)
               && request.resource.data.commentId is string
               && existsAfter(/databases/$(database)/documents/teams/$(request.resource.data.teamId)/tasks/$(request.resource.data.targetId)/comments/$(request.resource.data.commentId))
-              && getAfter(/databases/$(database)/documents/teams/$(request.resource.data.teamId)/tasks/$(request.resource.data.targetId)/comments/$(request.resource.data.commentId)).data.authorUid == request.auth.uid));
+              && getAfter(/databases/$(database)/documents/teams/$(request.resource.data.teamId)/tasks/$(request.resource.data.targetId)/comments/$(request.resource.data.commentId)).data.authorUid == request.auth.uid)
+            || (request.resource.data.type == 'task_mention'
+              && request.resource.data.commentId is string
+              && existsAfter(/databases/$(database)/documents/teams/$(request.resource.data.teamId)/tasks/$(request.resource.data.targetId)/comments/$(request.resource.data.commentId))
+              && getAfter(/databases/$(database)/documents/teams/$(request.resource.data.teamId)/tasks/$(request.resource.data.targetId)/comments/$(request.resource.data.commentId)).data.authorUid == request.auth.uid
+              && getAfter(/databases/$(database)/documents/teams/$(request.resource.data.teamId)/tasks/$(request.resource.data.targetId)/comments/$(request.resource.data.commentId)).data.mentionedUids is list
+              && userId in getAfter(/databases/$(database)/documents/teams/$(request.resource.data.teamId)/tasks/$(request.resource.data.targetId)/comments/$(request.resource.data.commentId)).data.mentionedUids));
         allow update: if signedIn()
           && request.auth.uid == userId
           && resource.data.recipientUid == userId
@@ -295,7 +301,9 @@ service cloud.firestore {
             || (request.resource.data.googleCalendarEventId is string && request.resource.data.googleCalendarEventId.size() <= 1024))
           && (!('calendarEventUrl' in request.resource.data)
             || (request.resource.data.calendarEventUrl is string
-              && (request.resource.data.calendarEventUrl == '' || request.resource.data.calendarEventUrl.matches('https://calendar\\.google\\.com/.*'))))
+              && (request.resource.data.calendarEventUrl == ''
+                || request.resource.data.calendarEventUrl.matches('https://(www\\.)?google\\.com/calendar/.*')
+                || request.resource.data.calendarEventUrl.matches('https://calendar\\.google\\.com/calendar/.*'))))
           && (!('meetingStart' in request.resource.data)
             || (request.resource.data.meetingStart is timestamp
               && 'meetingEnd' in request.resource.data))
@@ -305,7 +313,8 @@ service cloud.firestore {
           && (!('meetingStart' in request.resource.data)
             || request.resource.data.meetingEnd > request.resource.data.meetingStart)
           && (!('completedAt' in request.resource.data) || request.resource.data.completedAt == null || request.resource.data.completedAt is timestamp);
-        allow delete: if false;
+        allow delete: if canContribute(teamId)
+          && (isAdmin(teamId) || resource.data.createdBy == request.auth.uid);
 
         match /history/{eventId} {
           allow read: if isMember(teamId);
@@ -317,7 +326,10 @@ service cloud.firestore {
             && request.resource.data.from != request.resource.data.to
             && request.resource.data.createdAt == request.time
             && request.resource.data.keys().hasOnly(['actorUid', 'type', 'from', 'to', 'createdAt']);
-          allow update, delete: if false;
+          allow update: if false;
+          allow delete: if canContribute(teamId)
+            && (isAdmin(teamId)
+              || get(/databases/$(database)/documents/teams/$(teamId)/tasks/$(taskId)).data.createdBy == request.auth.uid);
         }
 
         match /comments/{commentId} {
@@ -329,11 +341,17 @@ service cloud.firestore {
             && request.resource.data.body.size() > 0
             && request.resource.data.body.size() <= 5000
             && request.resource.data.createdAt == request.time
-            && request.resource.data.keys().hasOnly(['authorUid', 'authorName', 'authorEmail', 'body', 'parentId', 'createdAt'])
+            && request.resource.data.keys().hasOnly(['authorUid', 'authorName', 'authorEmail', 'body', 'parentId', 'mentionedUids', 'createdAt'])
+            && (!('mentionedUids' in request.resource.data)
+              || (request.resource.data.mentionedUids is list
+                && request.resource.data.mentionedUids.size() <= 50))
             && (!('parentId' in request.resource.data)
               || (request.resource.data.parentId is string
                 && exists(/databases/$(database)/documents/teams/$(teamId)/tasks/$(taskId)/comments/$(request.resource.data.parentId))));
-          allow update, delete: if false;
+          allow update: if false;
+          allow delete: if canContribute(teamId)
+            && (isAdmin(teamId)
+              || get(/databases/$(database)/documents/teams/$(teamId)/tasks/$(taskId)).data.createdBy == request.auth.uid);
         }
       }
 

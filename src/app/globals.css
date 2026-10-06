@@ -1232,6 +1232,31 @@ a {
   border-top: 1px solid var(--line);
   padding: 17px 0;
 }
+.upcoming-line {
+  gap: 18px;
+}
+.upcoming-line > div:first-child {
+  min-width: 0;
+}
+.upcoming-actions,
+.task-management-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.upcoming-type {
+  display: inline-flex;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #f1f5f0;
+  color: #58765d;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
 .timezone-chip {
   background: #f2f5f1;
   padding: 6px 9px;
@@ -1473,6 +1498,39 @@ a {
 }
 .task-detail-modal .modal-top {
   flex: none;
+}
+.task-detail-modal .modal-top > div:first-child {
+  min-width: 0;
+}
+.task-detail-modal .modal-top h2 {
+  overflow-wrap: anywhere;
+}
+.task-management-actions .secondary-button,
+.task-management-actions .danger-button {
+  margin: 0;
+}
+.task-edit-fields {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+.danger-button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid #f0d8d4;
+  border-radius: 7px;
+  background: #fff8f6;
+  color: #a34438;
+  font-size: 10px;
+  cursor: pointer;
+}
+.danger-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 .task-detail-scroll {
   overflow-y: auto;
@@ -1807,6 +1865,7 @@ a {
   font-size: 10px;
 }
 .thread-composer {
+  position: relative;
   margin-top: 13px;
 }
 .thread-composer .primary-button {
@@ -1819,6 +1878,60 @@ a {
   margin-bottom: 6px;
   color: #78847a;
   font-size: 9px;
+}
+.mention-suggestions {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 8px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 24px #2330261a;
+}
+.mention-suggestions button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.mention-suggestions button:hover {
+  background: #f2f6f1;
+}
+.mention-suggestions button > span:last-child {
+  display: grid;
+  gap: 2px;
+}
+.mention-suggestions b {
+  color: var(--ink);
+  font-size: 10px;
+}
+.mention-suggestions small {
+  color: var(--muted);
+  font-size: 9px;
+}
+.mention-avatar {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: 50%;
+  background: #eaf2e8;
+  color: #507456;
+  font-size: 10px;
+  font-weight: 700;
+}
+.thread-mention {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #e7f1e6;
+  color: #356644;
+  font-weight: 600;
 }
 .login-shell.invite-gate {
   display: flex;

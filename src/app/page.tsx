@@ -13,6 +13,7 @@ import {
   deleteField,
   doc,
   getDoc,
+  getDocs,
   limit,
   onSnapshot,
   orderBy,
@@ -75,8 +76,11 @@ import {
   type TeamRole,
 } from "@/lib/data";
 import {
+  deleteGoogleMeeting,
+  getGoogleMeeting,
   requestGoogleCalendarAccess,
   scheduleGoogleMeeting,
+  updateGoogleMeeting,
 } from "@/lib/google-calendar";
 import {
   dateKeyInTimezone,
@@ -144,6 +148,30 @@ function dueInstant(item: Item): Date | null {
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
   return null;
+}
+
+function dateTimeInputInTimezone(value: unknown, timezone: string) {
+  const date =
+    value && typeof value === "object" && "toDate" in value
+      ? (value as { toDate: () => Date }).toDate()
+      : value instanceof Date
+        ? value
+        : typeof value === "string" || typeof value === "number"
+          ? new Date(value)
+          : null;
+  if (!date || Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const part = (type: string) =>
+    parts.find((entry) => entry.type === type)?.value || "00";
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`;
 }
 function formatDue(item: Item, timezone: string) {
   const date = dueInstant(item);
@@ -258,6 +286,12 @@ export default function Home() {
   const [commentDraft, setCommentDraft] = useState("");
   const [replyTo, setReplyTo] = useState<Item | null>(null);
   const [description, setDescription] = useState("");
+  const [taskEditOpen, setTaskEditOpen] = useState(false);
+  const [editTaskTitle, setEditTaskTitle] = useState("");
+  const [editTaskDue, setEditTaskDue] = useState("");
+  const [editTaskPriority, setEditTaskPriority] = useState("Medium");
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const threadInputRef = useRef<HTMLTextAreaElement>(null);
   const [attendeeEmails, setAttendeeEmails] = useState("");
   const [meetingStart, setMeetingStart] = useState("");
   const [meetingEnd, setMeetingEnd] = useState("");
@@ -750,6 +784,76 @@ export default function Home() {
     setScheduleMeetingOnCreate(false);
     setModal(kind);
   };
+  const showTaskDetails = (task: Item) => {
+    setSelectedTask(task);
+    setDescription(task.description || "");
+    setTaskEditOpen(false);
+    setEditTaskTitle(task.title || "");
+    setEditTaskDue(dateTimeInputInTimezone(dueInstant(task), zone));
+    setEditTaskPriority(task.priority || "Medium");
+    setMeetingStart(dateTimeInputInTimezone(task.meetingStart, zone));
+    setMeetingEnd(dateTimeInputInTimezone(task.meetingEnd, zone));
+    setAttendeeEmails("");
+    setReplyTo(null);
+    setCommentDraft("");
+    setMentionQuery(null);
+  };
+  const mentionSuggestions =
+    mentionQuery === null
+      ? []
+      : members
+          .filter((member) => member.id !== user?.uid)
+          .filter((member) => {
+            const name = member.displayName || member.email || "";
+            return (
+              !mentionQuery ||
+              name.toLowerCase().includes(mentionQuery.toLowerCase())
+            );
+          })
+          .slice(0, 6);
+  const insertThreadMention = (member: Item) => {
+    const input = threadInputRef.current;
+    const caret = input?.selectionStart ?? commentDraft.length;
+    const before = commentDraft.slice(0, caret);
+    const mentionToken = before.match(/(^|\s)@[^\s@]*$/);
+    if (!mentionToken) return;
+    const tokenStart = caret - mentionToken[0].length;
+    const prefix = before.slice(0, tokenStart) + mentionToken[1];
+    const mention = `@${member.displayName || member.email} `;
+    const next = prefix + mention + commentDraft.slice(caret);
+    setCommentDraft(next);
+    setMentionQuery(null);
+    requestAnimationFrame(() => {
+      input?.focus();
+      input?.setSelectionRange(
+        prefix.length + mention.length,
+        prefix.length + mention.length,
+      );
+    });
+  };
+  const renderThreadBody = (body: string) => {
+    const aliases = members
+      .flatMap((member) => [member.displayName, member.email?.split("@")[0]])
+      .filter((alias): alias is string => Boolean(alias?.trim()))
+      .map((alias) => `@${alias.trim()}`)
+      .sort((first, second) => second.length - first.length);
+    if (!aliases.length) return body;
+    const escapeRegex = (value: string) =>
+      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const matcher = new RegExp(
+      `(${aliases.map(escapeRegex).join("|")})(?=$|[\\s.,!?])`,
+      "gi",
+    );
+    return body.split(matcher).map((part, index) =>
+      aliases.some((alias) => alias.toLowerCase() === part.toLowerCase()) ? (
+        <mark className="thread-mention" key={`${part}-${index}`}>
+          {part}
+        </mark>
+      ) : (
+        part
+      ),
+    );
+  };
   const dismissInvite = () => {
     setPendingInvite(null);
     setInviteError("");
@@ -897,7 +1001,24 @@ export default function Home() {
     if (!user || !teamId || !selectedTask || !commentDraft.trim()) return;
     setBusy(true);
     try {
-      await addTaskComment(
+      const escapeRegex = (value: string) =>
+        value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const mentionedUids = members
+        .filter((member) => member.id !== user.uid)
+        .filter((member) => {
+          const aliases = [
+            member.displayName,
+            member.email?.split("@")[0],
+          ].filter((alias): alias is string => Boolean(alias?.trim()));
+          return aliases.some((alias) =>
+            new RegExp(
+              `@${escapeRegex(alias.trim())}(?=$|[\\s.,!?])`,
+              "i",
+            ).test(commentDraft),
+          );
+        })
+        .map((member) => member.id);
+      const notificationFailure = await addTaskComment(
         teamId,
         selectedTask.id,
         {
@@ -907,9 +1028,16 @@ export default function Home() {
         },
         commentDraft,
         replyTo?.id,
+        mentionedUids,
       );
       setCommentDraft("");
       setReplyTo(null);
+      setMentionQuery(null);
+      if (notificationFailure) {
+        setToast(
+          "Your message was posted, but one or more teammate notifications could not be delivered.",
+        );
+      }
     } catch {
       setToast("Could not post this discussion. Check your team role.");
     } finally {
@@ -942,6 +1070,215 @@ export default function Home() {
       setBusy(false);
     }
   };
+  const saveTaskEdits = async () => {
+    if (
+      !teamId ||
+      !selectedTask ||
+      !user ||
+      !editTaskTitle.trim() ||
+      !editTaskDue
+    )
+      return;
+    setBusy(true);
+    try {
+      let calendarUpdate:
+        { eventId: string; meetUrl: string; htmlLink: string } | undefined;
+      if (selectedTask.googleCalendarEventId) {
+        const accessToken = await requestGoogleCalendarAccess();
+        const start = selectedTask.meetingStart?.toDate
+          ? selectedTask.meetingStart.toDate()
+          : new Date(selectedTask.meetingStart);
+        const end = selectedTask.meetingEnd?.toDate
+          ? selectedTask.meetingEnd.toDate()
+          : new Date(selectedTask.meetingEnd);
+        calendarUpdate = await updateGoogleMeeting(
+          selectedTask.googleCalendarEventId,
+          {
+            title: `FounderOS · ${editTaskTitle.trim()}`,
+            description: description.trim() || editTaskTitle.trim(),
+            start,
+            end,
+            timezone: zone,
+          },
+          accessToken,
+        );
+      }
+      const batch = writeBatch(db);
+      batch.update(doc(db, "teams", teamId, "tasks", selectedTask.id), {
+        title: editTaskTitle.trim(),
+        priority: editTaskPriority,
+        dueAt: toUtcInstant(editTaskDue, zone),
+        description: description.trim(),
+        ...(calendarUpdate
+          ? {
+              meetingUrl: calendarUpdate.meetUrl,
+              calendarEventUrl: calendarUpdate.htmlLink || "",
+            }
+          : {}),
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(collection(db, "teams", teamId, "activity")), {
+        type: "task_updated",
+        title: "Edited a task",
+        detail: editTaskTitle.trim(),
+        actor: user.uid,
+        entityId: selectedTask.id,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      setSelectedTask({
+        ...selectedTask,
+        title: editTaskTitle.trim(),
+        priority: editTaskPriority,
+        dueAt: toUtcInstant(editTaskDue, zone),
+        description: description.trim(),
+        ...(calendarUpdate
+          ? {
+              meetingUrl: calendarUpdate.meetUrl,
+              calendarEventUrl: calendarUpdate.htmlLink || "",
+            }
+          : {}),
+      });
+      setTaskEditOpen(false);
+      setToast("Task updated");
+    } catch (error) {
+      setToast(
+        error instanceof Error ? error.message : "Could not update this task.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const deleteSelectedTask = async () => {
+    if (!teamId || !selectedTask || !user) return;
+    if (
+      !window.confirm(
+        selectedTask.googleCalendarEventId
+          ? "Delete this task and cancel its Google Calendar meeting? Guests will be notified."
+          : "Delete this task and its discussion permanently?",
+      )
+    )
+      return;
+    setBusy(true);
+    let calendarDeleted = false;
+    try {
+      if (selectedTask.googleCalendarEventId) {
+        const accessToken = await requestGoogleCalendarAccess();
+        await deleteGoogleMeeting(
+          selectedTask.googleCalendarEventId,
+          accessToken,
+        );
+        calendarDeleted = true;
+      }
+      const taskRef = doc(db, "teams", teamId, "tasks", selectedTask.id);
+      const [comments, history] = await Promise.all([
+        getDocs(collection(taskRef, "comments")),
+        getDocs(collection(taskRef, "history")),
+      ]);
+      for (const snapshot of [comments, history]) {
+        const documents = snapshot.docs;
+        for (let index = 0; index < documents.length; index += 400) {
+          const batch = writeBatch(db);
+          documents
+            .slice(index, index + 400)
+            .forEach((entry) => batch.delete(entry.ref));
+          await batch.commit();
+        }
+      }
+      const batch = writeBatch(db);
+      batch.delete(taskRef);
+      batch.set(doc(collection(db, "teams", teamId, "activity")), {
+        type: "task_deleted",
+        title: "Deleted a task",
+        detail: selectedTask.title,
+        actor: user.uid,
+        entityId: selectedTask.id,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      setSelectedTask(null);
+      setToast(
+        calendarDeleted
+          ? "Task deleted and its meeting cancelled"
+          : "Task and discussion deleted",
+      );
+    } catch (error) {
+      setToast(
+        calendarDeleted
+          ? `The Calendar meeting was cancelled, but the task could not be deleted: ${error instanceof Error ? error.message : "unknown error"}`
+          : error instanceof Error
+            ? error.message
+            : "Could not delete this task.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const removeTaskMeeting = async () => {
+    if (!teamId || !selectedTask || !user) return;
+    if (
+      !window.confirm(
+        selectedTask.googleCalendarEventId
+          ? "Delete this Google Calendar meeting? Guests will be notified. The task will stay."
+          : "Remove this meeting time from the task?",
+      )
+    )
+      return;
+    setBusy(true);
+    let calendarDeleted = false;
+    try {
+      if (selectedTask.googleCalendarEventId) {
+        const accessToken = await requestGoogleCalendarAccess();
+        await deleteGoogleMeeting(
+          selectedTask.googleCalendarEventId,
+          accessToken,
+        );
+        calendarDeleted = true;
+      }
+      const batch = writeBatch(db);
+      batch.update(doc(db, "teams", teamId, "tasks", selectedTask.id), {
+        googleCalendarEventId: deleteField(),
+        meetingUrl: deleteField(),
+        calendarEventUrl: deleteField(),
+        meetingStart: deleteField(),
+        meetingEnd: deleteField(),
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(collection(db, "teams", teamId, "activity")), {
+        type: "meeting_cancelled",
+        title: "Cancelled a team meeting",
+        detail: selectedTask.title,
+        actor: user.uid,
+        entityId: selectedTask.id,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      const taskWithoutMeeting = { ...selectedTask };
+      delete taskWithoutMeeting.googleCalendarEventId;
+      delete taskWithoutMeeting.meetingUrl;
+      delete taskWithoutMeeting.calendarEventUrl;
+      delete taskWithoutMeeting.meetingStart;
+      delete taskWithoutMeeting.meetingEnd;
+      setSelectedTask(taskWithoutMeeting);
+      setMeetingStart("");
+      setMeetingEnd("");
+      setToast(
+        calendarDeleted
+          ? "Meeting cancelled and guests notified"
+          : "Meeting removed from the task",
+      );
+    } catch (error) {
+      setToast(
+        calendarDeleted
+          ? `The Calendar meeting was cancelled, but FounderOS could not update the task: ${error instanceof Error ? error.message : "unknown error"}`
+          : error instanceof Error
+            ? error.message
+            : "Could not remove this meeting.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
   const createGoogleMeet = async (task: Item) => {
     if (!teamId || !user || memberRole === "Viewer") return;
     const start = task.meetingStart?.toDate
@@ -955,11 +1292,8 @@ export default function Home() {
       return;
     }
     if (task.meetingUrl) return;
-    if (task.googleCalendarEventId) {
-      setToast("Google is still preparing the Meet link for this event.");
-      return;
-    }
     setBusy(true);
+    let meetingCreatedInGoogle = false;
     try {
       const accessToken = await requestGoogleCalendarAccess();
       const invitedEmails = attendeeEmails
@@ -977,16 +1311,29 @@ export default function Home() {
       ) {
         invitedEmails.push(assigneeEmail);
       }
-      const meeting = await scheduleGoogleMeeting(
-        {
-          title: `FounderOS · ${task.title}`,
-          description: task.description || task.title,
-          start,
-          end,
-          timezone: task.timezone || zone,
-          attendeeEmails: invitedEmails,
-        },
-        accessToken,
+      const meeting = task.googleCalendarEventId
+        ? await getGoogleMeeting(task.googleCalendarEventId, accessToken)
+        : await scheduleGoogleMeeting(
+            {
+              title: `FounderOS · ${task.title}`,
+              description: task.description || task.title,
+              start,
+              end,
+              timezone: task.timezone || zone,
+              attendeeEmails: invitedEmails,
+            },
+            accessToken,
+          );
+      meetingCreatedInGoogle = true;
+      setSelectedTask((current) =>
+        current?.id === task.id
+          ? {
+              ...current,
+              googleCalendarEventId: meeting.eventId,
+              meetingUrl: meeting.meetUrl,
+              calendarEventUrl: meeting.htmlLink || "",
+            }
+          : current,
       );
       const batch = writeBatch(db);
       batch.update(doc(db, "teams", teamId, "tasks", task.id), {
@@ -996,8 +1343,12 @@ export default function Home() {
         updatedAt: serverTimestamp(),
       });
       batch.set(doc(collection(db, "teams", teamId, "activity")), {
-        type: "meeting_link_created",
-        title: "Created a Google Meet link",
+        type: task.googleCalendarEventId
+          ? "meeting_link_recovered"
+          : "meeting_link_created",
+        title: task.googleCalendarEventId
+          ? "Recovered a Google Meet link"
+          : "Created a Google Meet link",
         detail: task.title,
         actor: user.uid,
         entityId: task.id,
@@ -1016,14 +1367,16 @@ export default function Home() {
       );
       setToast(
         meeting.meetUrl
-          ? "Google Meet link created"
-          : "Calendar event created; Google is still preparing the Meet link. Try again shortly.",
+          ? "Google Meet link is ready"
+          : "Calendar event is saved; Google is still preparing the Meet link. Retry shortly.",
       );
     } catch (error) {
       setToast(
-        error instanceof Error
-          ? error.message
-          : "Could not schedule the meeting.",
+        meetingCreatedInGoogle
+          ? `Google created the event, but FounderOS could not save its details: ${error instanceof Error ? error.message : "unknown error"}`
+          : error instanceof Error
+            ? error.message
+            : "Could not schedule the meeting.",
       );
     } finally {
       setBusy(false);
@@ -1051,17 +1404,23 @@ export default function Home() {
       ) {
         invitedEmails.push(assigneeEmail);
       }
-      const meeting = await scheduleGoogleMeeting(
-        {
-          title: `FounderOS · ${selectedTask.title}`,
-          description: selectedTask.description || selectedTask.title,
-          start: toUtcInstant(meetingStart, zone),
-          end: toUtcInstant(meetingEnd, zone),
-          timezone: zone,
-          attendeeEmails: invitedEmails,
-        },
-        accessToken,
-      );
+      const meetingInput = {
+        title: `FounderOS · ${selectedTask.title}`,
+        description: selectedTask.description || selectedTask.title,
+        start: toUtcInstant(meetingStart, zone),
+        end: toUtcInstant(meetingEnd, zone),
+        timezone: zone,
+      };
+      const meeting = selectedTask.googleCalendarEventId
+        ? await updateGoogleMeeting(
+            selectedTask.googleCalendarEventId,
+            { ...meetingInput, attendeeEmails: invitedEmails },
+            accessToken,
+          )
+        : await scheduleGoogleMeeting(
+            { ...meetingInput, attendeeEmails: invitedEmails },
+            accessToken,
+          );
       const batch = writeBatch(db);
       batch.update(doc(db, "teams", teamId, "tasks", selectedTask.id), {
         googleCalendarEventId: meeting.eventId,
@@ -1091,8 +1450,10 @@ export default function Home() {
       setSelectedTask(scheduledTask);
       setToast(
         meeting.meetUrl
-          ? "Google Calendar meeting scheduled"
-          : "Calendar event scheduled; Meet link is still being prepared",
+          ? selectedTask.googleCalendarEventId
+            ? "Google Calendar meeting rescheduled"
+            : "Google Calendar meeting scheduled"
+          : "Calendar event saved; Meet link is still being prepared",
       );
     } catch (error) {
       setToast(
@@ -1964,6 +2325,10 @@ export default function Home() {
     memberRole === "Admin" ||
     selectedTask?.ownerUid === user.uid ||
     selectedTask?.createdBy === user.uid;
+  const canManageSelectedTask =
+    memberRole === "Owner" ||
+    memberRole === "Admin" ||
+    selectedTask?.createdBy === user.uid;
   const filteredRows = rows.filter((item) => {
     const matchesSearch = `${item.title || ""} ${item.description || ""}`
       .toLowerCase()
@@ -1972,11 +2337,13 @@ export default function Home() {
       statusFilter === "All status" || item.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
-  const scheduledItems = [...tasks, ...commitments]
-    .filter((item) => dueInstant(item) && item.status !== "Completed")
-    .sort((a, b) => dueInstant(a)!.getTime() - dueInstant(b)!.getTime());
   const scheduledMeetings = tasks
-    .filter((task) => task.meetingStart && task.status !== "Cancelled")
+    .filter(
+      (task) =>
+        task.meetingStart &&
+        task.status !== "Cancelled" &&
+        task.status !== "Completed",
+    )
     .sort((first, second) => {
       const firstDate = first.meetingStart?.toDate
         ? first.meetingStart.toDate()
@@ -1986,6 +2353,55 @@ export default function Home() {
         : new Date(second.meetingStart);
       return firstDate.getTime() - secondDate.getTime();
     });
+  const upcomingItems: Item[] = [
+    ...tasks
+      .filter(
+        (item) =>
+          dueInstant(item) &&
+          item.status !== "Completed" &&
+          item.status !== "Cancelled",
+      )
+      .map((item) => ({
+        ...item,
+        timelineType: "Task",
+        timelineAt: dueInstant(item)!,
+      })),
+    ...commitments
+      .filter(
+        (item) =>
+          dueInstant(item) &&
+          !["Completed", "Cancelled", "Missed"].includes(item.status),
+      )
+      .map((item) => ({
+        ...item,
+        timelineType: "Commitment",
+        timelineAt: dueInstant(item)!,
+      })),
+    ...milestones
+      .filter(
+        (item) =>
+          dueInstant(item) &&
+          item.status !== "Completed" &&
+          item.status !== "Cancelled",
+      )
+      .map((item) => ({
+        ...item,
+        timelineType: "Milestone",
+        timelineAt: dueInstant(item)!,
+      })),
+    ...scheduledMeetings.map((item) => ({
+      ...item,
+      timelineType: "Meeting",
+      timelineAt: item.meetingStart?.toDate
+        ? item.meetingStart.toDate()
+        : new Date(item.meetingStart),
+    })),
+  ]
+    .filter((item) => item.timelineAt.getTime() >= clockNow.getTime())
+    .sort(
+      (first, second) =>
+        first.timelineAt.getTime() - second.timelineAt.getTime(),
+    );
   const busyIntervals = scheduledMeetings.map((meeting) => ({
     start: meeting.meetingStart?.toDate
       ? meeting.meetingStart.toDate()
@@ -2211,8 +2627,7 @@ export default function Home() {
                           (item) => item.id === notification.targetId,
                         );
                         if (task) {
-                          setSelectedTask(task);
-                          setDescription(task.description || "");
+                          showTaskDetails(task);
                         }
                         setQuickNotificationsOpen(false);
                       }}
@@ -3281,8 +3696,7 @@ export default function Home() {
                       (item) => item.id === notification.targetId,
                     );
                     if (task) {
-                      setSelectedTask(task);
-                      setDescription(task.description || "");
+                      showTaskDetails(task);
                     }
                   }}
                 >
@@ -3667,73 +4081,73 @@ export default function Home() {
             </div>
           ) : section === "Calendar" ? (
             <div className="panel simple-panel">
-              <div className="panel-kicker">UPCOMING DEADLINES</div>
-              <h2>Your work in local time</h2>
-              {scheduledItems.map((item) => (
-                <div className="settings-line" key={item.id}>
+              <div className="panel-kicker">UP NEXT · {zone}</div>
+              <h2>Company schedule</h2>
+              <p className="settings-description">
+                Upcoming tasks, commitments, milestones, and team meetings in
+                one timeline.
+              </p>
+              {upcomingItems.map((item) => (
+                <div
+                  className="settings-line upcoming-line"
+                  key={`${item.timelineType}:${item.id}`}
+                >
                   <div>
                     <b>{item.title || item.description}</b>
                     <small>
+                      <span className="upcoming-type">{item.timelineType}</span>
+                      {item.timelineType === "Meeting" && item.meetingEnd
+                        ? ` · ${formatInstantInTimezone(item.timelineAt, zone)} – ${formatInstantInTimezone(item.meetingEnd?.toDate ? item.meetingEnd.toDate() : new Date(item.meetingEnd), zone)}`
+                        : ` · ${formatInstantInTimezone(item.timelineAt, zone)}`}
                       {item.description && item.title
-                        ? item.description
-                        : item.status}
+                        ? ` · ${item.description}`
+                        : item.status
+                          ? ` · ${item.status}`
+                          : ""}
                     </small>
                   </div>
-                  <span className="timezone-chip">{formatDue(item, zone)}</span>
-                </div>
-              ))}
-              {!scheduledItems.length && (
-                <Empty
-                  title="Nothing scheduled yet."
-                  text="Add a task or commitment with a due time to see it here."
-                  action={() => open("task")}
-                />
-              )}
-              <div className="meeting-calendar-list">
-                <div className="panel-kicker">SCHEDULED MEETINGS</div>
-                {scheduledMeetings.map((meeting) => (
-                  <div className="settings-line" key={meeting.id}>
-                    <div>
-                      <b>{meeting.title}</b>
-                      <small>
-                        {formatInstantInTimezone(
-                          meeting.meetingStart?.toDate
-                            ? meeting.meetingStart.toDate()
-                            : new Date(meeting.meetingStart),
-                          zone,
-                        )}{" "}
-                        · task meeting
-                      </small>
-                    </div>
-                    {meeting.meetingUrl ? (
+                  <div className="upcoming-actions">
+                    {(item.timelineType === "Task" ||
+                      item.timelineType === "Meeting") && (
+                      <button
+                        className="text-action"
+                        onClick={() => showTaskDetails(item)}
+                      >
+                        Details
+                      </button>
+                    )}
+                    {item.timelineType === "Meeting" && item.meetingUrl && (
                       <a
                         className="meeting-link"
-                        href={meeting.meetingUrl}
+                        href={item.meetingUrl}
                         target="_blank"
                         rel="noreferrer"
                       >
                         Join <ArrowRight size={13} />
                       </a>
-                    ) : (
-                      meeting.calendarEventUrl && (
+                    )}
+                    {item.timelineType === "Meeting" &&
+                      !item.meetingUrl &&
+                      item.calendarEventUrl && (
                         <a
                           className="meeting-link"
-                          href={meeting.calendarEventUrl}
+                          href={item.calendarEventUrl}
                           target="_blank"
                           rel="noreferrer"
                         >
                           Open event <ArrowRight size={13} />
                         </a>
-                      )
-                    )}
+                      )}
                   </div>
-                ))}
-                {!scheduledMeetings.length && (
-                  <p className="form-hint">
-                    No meetings scheduled yet. Open a task to schedule one.
-                  </p>
-                )}
-              </div>
+                </div>
+              ))}
+              {!upcomingItems.length && (
+                <Empty
+                  title="Nothing scheduled yet."
+                  text="Tasks, commitments, milestones, and meetings will appear here when they are upcoming."
+                  action={() => open("task")}
+                />
+              )}
             </div>
           ) : section === "Meetings" ? (
             <div className="panel simple-panel">
@@ -3770,13 +4184,7 @@ export default function Home() {
                     <button
                       className="text-action"
                       onClick={() => {
-                        setSelectedTask(meeting);
-                        setDescription(meeting.description || "");
-                        setMeetingStart("");
-                        setMeetingEnd("");
-                        setAttendeeEmails("");
-                        setReplyTo(null);
-                        setCommentDraft("");
+                        showTaskDetails(meeting);
                       }}
                     >
                       Details
@@ -3948,13 +4356,7 @@ export default function Home() {
                     <button
                       className="text-action task-details-action"
                       onClick={() => {
-                        setSelectedTask(item);
-                        setDescription(item.description || "");
-                        setMeetingStart("");
-                        setMeetingEnd("");
-                        setAttendeeEmails("");
-                        setReplyTo(null);
-                        setCommentDraft("");
+                        showTaskDetails(item);
                       }}
                     >
                       Details
@@ -4215,6 +4617,24 @@ export default function Home() {
                 <div className="panel-kicker">TASK DETAILS</div>
                 <h2 id="task-detail-title">{selectedTask.title}</h2>
               </div>
+              {canManageSelectedTask && (
+                <div className="task-management-actions">
+                  <button
+                    className="secondary-button"
+                    disabled={busy}
+                    onClick={() => setTaskEditOpen((open) => !open)}
+                  >
+                    {taskEditOpen ? "Close edit" : "Edit task"}
+                  </button>
+                  <button
+                    className="danger-button"
+                    disabled={busy}
+                    onClick={() => void deleteSelectedTask()}
+                  >
+                    Delete task
+                  </button>
+                </div>
+              )}
               <button
                 className="icon-button"
                 aria-label="Close task details"
@@ -4224,6 +4644,54 @@ export default function Home() {
               </button>
             </div>
             <div className="task-detail-scroll">
+              {taskEditOpen && canManageSelectedTask && (
+                <section className="task-edit-fields">
+                  <label>
+                    Task name
+                    <input
+                      maxLength={200}
+                      value={editTaskTitle}
+                      onChange={(event) => setEditTaskTitle(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Due date and time ({zone})
+                    <input
+                      type="datetime-local"
+                      value={editTaskDue}
+                      onChange={(event) => setEditTaskDue(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Priority
+                    <select
+                      value={editTaskPriority}
+                      onChange={(event) =>
+                        setEditTaskPriority(event.target.value)
+                      }
+                    >
+                      {["Low", "Medium", "High", "Critical"].map((value) => (
+                        <option key={value}>{value}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="task-management-actions">
+                    <button
+                      className="primary-button"
+                      disabled={busy || !editTaskTitle.trim() || !editTaskDue}
+                      onClick={() => void saveTaskEdits()}
+                    >
+                      {busy ? "Saving…" : "Save task changes"}
+                    </button>
+                    <button
+                      className="secondary-button"
+                      onClick={() => setTaskEditOpen(false)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </section>
+              )}
               <label>
                 Description and context
                 <textarea
@@ -4304,14 +4772,17 @@ export default function Home() {
                 )}
                 {selectedTask.meetingStart &&
                   !selectedTask.meetingUrl &&
-                  memberRole !== "Viewer" &&
-                  !selectedTask.googleCalendarEventId && (
+                  memberRole !== "Viewer" && (
                     <button
                       className="primary-button"
                       disabled={busy}
                       onClick={() => void createGoogleMeet(selectedTask)}
                     >
-                      {busy ? "Creating link…" : "Create Google Meet link"}{" "}
+                      {busy
+                        ? "Checking Google Meet…"
+                        : selectedTask.googleCalendarEventId
+                          ? "Retry Google Meet link"
+                          : "Create Google Meet link"}{" "}
                       <ArrowRight size={14} />
                     </button>
                   )}
@@ -4325,10 +4796,19 @@ export default function Home() {
                 {selectedTask.googleCalendarEventId &&
                   !selectedTask.meetingUrl && (
                     <small className="form-hint">
-                      Meet link is being prepared. Open the Calendar event to
-                      view its details.
+                      The event is in Google Calendar. Retry to load its Meet
+                      link if it has finished generating.
                     </small>
                   )}
+                {selectedTask.meetingStart && canManageSelectedTask && (
+                  <button
+                    className="danger-button"
+                    disabled={busy}
+                    onClick={() => void removeTaskMeeting()}
+                  >
+                    Delete meeting
+                  </button>
+                )}
                 {memberRole !== "Viewer" && (
                   <>
                     <label>
@@ -4379,7 +4859,11 @@ export default function Home() {
                       }
                       onClick={createMeeting}
                     >
-                      {busy ? "Scheduling…" : "Schedule meeting"}{" "}
+                      {busy
+                        ? "Saving meeting…"
+                        : selectedTask.googleCalendarEventId
+                          ? "Reschedule meeting"
+                          : "Schedule meeting"}{" "}
                       <ArrowRight size={14} />
                     </button>
                   </>
@@ -4407,7 +4891,7 @@ export default function Home() {
                               : "Just now"}
                           </small>
                         </div>
-                        <p>{comment.body}</p>
+                        <p>{renderThreadBody(comment.body)}</p>
                         {memberRole !== "Viewer" && (
                           <button
                             className="text-action"
@@ -4431,7 +4915,7 @@ export default function Home() {
                                     : "Just now"}
                                 </small>
                               </div>
-                              <p>{reply.body}</p>
+                              <p>{renderThreadBody(reply.body)}</p>
                             </div>
                           ))}
                       </article>
@@ -4456,11 +4940,49 @@ export default function Home() {
                         </button>
                       </div>
                     )}
+                    {mentionSuggestions.length > 0 && (
+                      <div
+                        className="mention-suggestions"
+                        role="listbox"
+                        aria-label="Mention a teammate"
+                      >
+                        {mentionSuggestions.map((member) => (
+                          <button
+                            type="button"
+                            key={member.id}
+                            role="option"
+                            aria-selected="false"
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => insertThreadMention(member)}
+                          >
+                            <span className="mention-avatar">
+                              {(member.displayName || member.email || "?")
+                                .slice(0, 1)
+                                .toUpperCase()}
+                            </span>
+                            <span>
+                              <b>{member.displayName || member.email}</b>
+                              {member.email && <small>{member.email}</small>}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                     <textarea
+                      ref={threadInputRef}
                       rows={3}
                       maxLength={5000}
                       value={commentDraft}
-                      onChange={(event) => setCommentDraft(event.target.value)}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setCommentDraft(value);
+                        const before = value.slice(
+                          0,
+                          event.target.selectionStart,
+                        );
+                        const match = before.match(/(?:^|\s)@([^\s@]*)$/);
+                        setMentionQuery(match ? match[1] : null);
+                      }}
                       placeholder={
                         replyTo
                           ? "Write a reply…"
