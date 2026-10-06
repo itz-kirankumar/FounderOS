@@ -64,7 +64,7 @@ Every workspace read requires membership. Team invites are random 256-bit links,
 
 Task descriptions can be added at creation or edited later. Each task has a live discussion thread with replies. Team members set their local workdays, hours, and availability; the common-time finder translates those windows across IANA timezones and avoids scheduled team meetings. Weekly reviews preserve previous versions. Scheduling a meeting requests Calendar permission, creates an event in the acting user's primary Google Calendar, emails attendees through Google Calendar, and requests a Google Meet conference link. In-app notifications cover new assignments and task discussion replies; email/WhatsApp reminders and scheduled digests need a delivery provider and are not configured.
 
-Before enabling meeting scheduling in production, enable the Google Calendar API in the Google Cloud project used by Firebase Authentication, configure the OAuth consent screen and authorized domains, and publish/verify the `https://www.googleapis.com/auth/calendar.events` scope as required for the audience. Each organizer must grant Calendar access. Cloud Firestore backups, alerting, and production OAuth domains must also be configured before launch.
+The Google Calendar API is enabled in the Google Cloud project used by Firebase Authentication. Each organizer must grant Calendar access before creating a Google Meet link; configure the OAuth consent screen, authorized domains, and the `https://www.googleapis.com/auth/calendar.events` scope for the app's audience. Cloud Firestore backups, alerting, and production OAuth domains must also be configured before launch.
 
 ## Current product scope
 

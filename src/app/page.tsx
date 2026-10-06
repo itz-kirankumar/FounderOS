@@ -75,6 +75,10 @@ import {
   type TeamRole,
 } from "@/lib/data";
 import {
+  requestGoogleCalendarAccess,
+  scheduleGoogleMeeting,
+} from "@/lib/google-calendar";
+import {
   dateKeyInTimezone,
   detectBrowserTimezone,
   formatDateInTimezone,
@@ -497,7 +501,7 @@ export default function Home() {
     return () => subs.forEach((unsub) => unsub());
   }, [teamId, user, detectedZone]);
   useEffect(() => {
-    if (!teamId || !user) return;
+    if (!teamId || !user || memberRole === "Viewer") return;
     const unsubscribeMembers = onSnapshot(
       query(
         collection(db, "teams", teamId, "members"),
@@ -936,6 +940,78 @@ export default function Home() {
       setBusy(false);
     }
   };
+  const createGoogleMeet = async (task: Item) => {
+    if (!teamId || !user || memberRole === "Viewer") return;
+    const start = task.meetingStart?.toDate
+      ? task.meetingStart.toDate()
+      : new Date(task.meetingStart);
+    const end = task.meetingEnd?.toDate
+      ? task.meetingEnd.toDate()
+      : new Date(task.meetingEnd);
+    if (!task.meetingStart || !task.meetingEnd || end <= start) {
+      setToast("Add a valid meeting time before creating its join link.");
+      return;
+    }
+    if (task.meetingUrl) return;
+    if (task.googleCalendarEventId) {
+      setToast("Google is still preparing the Meet link for this event.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const accessToken = await requestGoogleCalendarAccess();
+      const meeting = await scheduleGoogleMeeting(
+        {
+          title: `FounderOS · ${task.title}`,
+          description: task.description || task.title,
+          start,
+          end,
+          timezone: task.timezone || zone,
+          attendeeEmails: [],
+        },
+        accessToken,
+      );
+      const batch = writeBatch(db);
+      batch.update(doc(db, "teams", teamId, "tasks", task.id), {
+        googleCalendarEventId: meeting.eventId,
+        meetingUrl: meeting.meetUrl,
+        calendarEventUrl: meeting.htmlLink || "",
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(collection(db, "teams", teamId, "activity")), {
+        type: "meeting_link_created",
+        title: "Created a Google Meet link",
+        detail: task.title,
+        actor: user.uid,
+        entityId: task.id,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      setSelectedTask((current) =>
+        current?.id === task.id
+          ? {
+              ...current,
+              googleCalendarEventId: meeting.eventId,
+              meetingUrl: meeting.meetUrl,
+              calendarEventUrl: meeting.htmlLink || "",
+            }
+          : current,
+      );
+      setToast(
+        meeting.meetUrl
+          ? "Google Meet link created"
+          : "Calendar event created; Google is still preparing the Meet link. Try again shortly.",
+      );
+    } catch (error) {
+      setToast(
+        error instanceof Error
+          ? error.message
+          : "Could not schedule the meeting.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
   const createMeeting = async () => {
     if (!teamId || !selectedTask || !meetingStart || !meetingEnd || !user)
       return;
@@ -956,12 +1032,13 @@ export default function Home() {
         createdAt: serverTimestamp(),
       });
       await batch.commit();
-      setSelectedTask({
+      const scheduledTask = {
         ...selectedTask,
         meetingStart: toUtcInstant(meetingStart, zone),
         meetingEnd: toUtcInstant(meetingEnd, zone),
-      });
-      setToast("Team meeting scheduled");
+      };
+      setSelectedTask(scheduledTask);
+      setToast("Team meeting scheduled. Create a Google Meet link when ready.");
     } catch (error) {
       setToast(
         error instanceof Error
@@ -3526,7 +3603,8 @@ export default function Home() {
               <div className="panel-kicker">TEAM CALENDAR</div>
               <h2>Team meetings</h2>
               <p className="meetings-intro">
-                Meetings scheduled from team tasks, shown in {zone}.
+                Meetings scheduled from team tasks, shown in {zone}. Create a
+                Google Meet link from a meeting when you’re ready.
               </p>
               {scheduledMeetings.map((meeting) => (
                 <div className="settings-line" key={meeting.id}>
@@ -3547,18 +3625,54 @@ export default function Home() {
                         zone,
                       )}
                     </small>
+                    {meeting.description && (
+                      <small>{meeting.description}</small>
+                    )}
                   </div>
-                  {meeting.meetingUrl ? (
-                    <a
-                      className="meeting-link"
-                      href={meeting.meetingUrl}
-                      target="_blank"
-                      rel="noreferrer"
+                  <div className="meeting-actions">
+                    <button
+                      className="text-action"
+                      onClick={() => {
+                        setSelectedTask(meeting);
+                        setDescription(meeting.description || "");
+                      }}
                     >
-                      Join Google Meet <ArrowRight size={13} />
-                    </a>
-                  ) : (
-                    meeting.calendarEventUrl && (
+                      Details
+                    </button>
+                    {meeting.meetingUrl ? (
+                      <a
+                        className="meeting-link"
+                        href={meeting.meetingUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Join Google Meet <ArrowRight size={13} />
+                      </a>
+                    ) : meeting.googleCalendarEventId ? (
+                      meeting.calendarEventUrl ? (
+                        <a
+                          className="meeting-link"
+                          href={meeting.calendarEventUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Open Calendar event <ArrowRight size={13} />
+                        </a>
+                      ) : (
+                        <small className="form-hint">
+                          Meet link is being prepared.
+                        </small>
+                      )
+                    ) : memberRole !== "Viewer" ? (
+                      <button
+                        className="meeting-link meeting-link-button"
+                        disabled={busy}
+                        onClick={() => void createGoogleMeet(meeting)}
+                      >
+                        {busy ? "Creating link…" : "Create Google Meet link"}
+                        <ArrowRight size={13} />
+                      </button>
+                    ) : meeting.calendarEventUrl ? (
                       <a
                         className="meeting-link"
                         href={meeting.calendarEventUrl}
@@ -3567,8 +3681,8 @@ export default function Home() {
                       >
                         Open Calendar event <ArrowRight size={13} />
                       </a>
-                    )
-                  )}
+                    ) : null}
+                  </div>
                 </div>
               ))}
               {!scheduledMeetings.length && (
@@ -3981,11 +4095,34 @@ export default function Home() {
               )}
               <section className="meeting-card">
                 <div className="panel-kicker">TEAM CALENDAR</div>
-                <h3>Schedule a team meeting</h3>
-                <p>
-                  Set the time here; teammates can see it in the Meetings and
-                  Calendar views.
-                </p>
+                <h3>
+                  {selectedTask.meetingStart
+                    ? "Meeting details"
+                    : "Schedule a team meeting"}
+                </h3>
+                {!selectedTask.meetingStart && (
+                  <p>
+                    Set the time here; teammates can see it in the Meetings and
+                    Calendar views.
+                  </p>
+                )}
+                {selectedTask.meetingStart && selectedTask.meetingEnd && (
+                  <p className="meeting-scheduled-time">
+                    {formatInstantInTimezone(
+                      selectedTask.meetingStart?.toDate
+                        ? selectedTask.meetingStart.toDate()
+                        : new Date(selectedTask.meetingStart),
+                      zone,
+                    )}{" "}
+                    –{" "}
+                    {formatInstantInTimezone(
+                      selectedTask.meetingEnd?.toDate
+                        ? selectedTask.meetingEnd.toDate()
+                        : new Date(selectedTask.meetingEnd),
+                      zone,
+                    )}
+                  </p>
+                )}
                 {selectedTask.meetingUrl && (
                   <a
                     className="meeting-link"
@@ -4006,6 +4143,33 @@ export default function Home() {
                     Open in Google Calendar <ArrowRight size={14} />
                   </a>
                 )}
+                {selectedTask.meetingStart &&
+                  !selectedTask.meetingUrl &&
+                  memberRole !== "Viewer" &&
+                  !selectedTask.googleCalendarEventId && (
+                    <button
+                      className="primary-button"
+                      disabled={busy}
+                      onClick={() => void createGoogleMeet(selectedTask)}
+                    >
+                      {busy ? "Creating link…" : "Create Google Meet link"}{" "}
+                      <ArrowRight size={14} />
+                    </button>
+                  )}
+                {selectedTask.meetingStart &&
+                  !selectedTask.meetingUrl &&
+                  !selectedTask.googleCalendarEventId && (
+                    <small className="form-hint">
+                      A Google Meet join link hasn’t been created yet.
+                    </small>
+                  )}
+                {selectedTask.googleCalendarEventId &&
+                  !selectedTask.meetingUrl && (
+                    <small className="form-hint">
+                      Meet link is being prepared. Open the Calendar event to
+                      view its details.
+                    </small>
+                  )}
                 {memberRole !== "Viewer" && (
                   <>
                     <div className="meeting-times">

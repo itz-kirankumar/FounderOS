@@ -1724,6 +1724,29 @@ a {
 .meeting-link:hover {
   text-decoration: underline;
 }
+.meeting-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.meeting-link-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.meeting-link-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+.meeting-scheduled-time {
+  margin: 8px 0 12px;
+  color: var(--ink, #28352b);
+  font-size: 11px;
+  font-weight: 600;
+}
 .meeting-calendar-list {
   border-top: 1px solid var(--line);
   margin-top: 20px;
