@@ -54,9 +54,15 @@ Use a Node.js 22 deployment runtime. The app sends security headers, disables se
 - `teams/{teamId}/members/{uid}` stores membership and role.
 - `teams/{teamId}/tasks`, `commitments`, and `projects` store operating records.
 - `teams/{teamId}/activity` is readable by members and append-only through the client rules.
+- `teams/{teamId}/invites/{token}` stores expiring, single-use team invitations.
+- `teams/{teamId}/tasks/{taskId}/comments/{commentId}` stores threaded task discussions.
 
-Every workspace read requires membership. User profiles are owner-readable. Task, commitment, project, and activity writes are validated by rules; task changes and their activity records are committed atomically. Cloud Firestore backups, alerting, and production OAuth domains must be configured in the Firebase project before launch.
+Every workspace read requires membership. Team invites are random 256-bit links, bound to a verified email address, single-use, and expire after seven days. Owners can assign Admin, Member, or Viewer; Admins can assign Member or Viewer. Owners/Admins manage membership and invites within those limits. Members can contribute and discuss; Viewers are read-only. Firestore rules enforce these permissions, invite acceptance, and immutable discussion history. FounderOS generates a copyable invite link; the team owner shares it with the invitee. Automatic email delivery requires an email provider and is not configured yet.
+
+Task descriptions can be added at creation or edited later. Each task has a live discussion thread with replies. Scheduling a meeting requests Calendar permission, creates an event in the acting user's primary Google Calendar, emails attendees through Google Calendar, and requests a Google Meet conference link.
+
+Before enabling meeting scheduling in production, enable the Google Calendar API in the Google Cloud project used by Firebase Authentication, configure the OAuth consent screen and authorized domains, and publish/verify the `https://www.googleapis.com/auth/calendar.events` scope as required for the audience. Each organizer must grant Calendar access. Cloud Firestore backups, alerting, and production OAuth domains must also be configured before launch.
 
 ## Current product scope
 
-The current release includes Google sign-in, per-user workspace setup, task creation/status changes, commitments, projects, activity history, and a dashboard. Team invitations, shared meetings, calendar scheduling, reminder delivery, weekly reviews, and analytics are not yet implemented. Do not present these as available features until they ship.
+The current release includes Google sign-in, multiple team workspaces per user, role-based team management, email-bound invitation links, task descriptions and threaded discussions, Google Calendar meeting scheduling, commitments, projects, activity history, and a dashboard. Reminder delivery, weekly reviews, and analytics are not yet implemented.

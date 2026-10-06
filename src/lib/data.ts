@@ -1,5 +1,4 @@
 import {
-  addDoc,
   collection,
   doc,
   getDoc,
@@ -9,6 +8,7 @@ import {
   runTransaction,
   serverTimestamp,
   setDoc,
+  Timestamp,
   writeBatch,
 } from "firebase/firestore";
 import { db } from "./firebase";
@@ -73,6 +73,139 @@ export async function changeTask(
   });
   await batch.commit();
 }
+
+export type TeamRole = "Owner" | "Admin" | "Member" | "Viewer";
+
+export async function createInvitation(
+  teamId: string,
+  email: string,
+  role: Exclude<TeamRole, "Owner">,
+  actor: string,
+) {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const token = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  const expiresAt = Timestamp.fromDate(
+    new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+  );
+  const batch = writeBatch(db);
+  batch.set(doc(db, "teams", teamId, "invites", token), {
+    email: email.trim().toLowerCase(),
+    role,
+    status: "pending",
+    createdBy: actor,
+    createdAt: serverTimestamp(),
+    expiresAt,
+  });
+  batch.set(doc(collection(db, "teams", teamId, "activity")), {
+    type: "team_invitation_created",
+    title: "Created a team invitation",
+    actor,
+    entityId: "team",
+    createdAt: serverTimestamp(),
+  });
+  await batch.commit();
+  return token;
+}
+
+export async function acceptInvitation(
+  teamId: string,
+  token: string,
+  user: {
+    uid: string;
+    email: string;
+    displayName: string;
+    photoURL?: string | null;
+  },
+  timezone: string,
+) {
+  const invitationRef = doc(db, "teams", teamId, "invites", token);
+  const profileRef = doc(db, "users", user.uid);
+  const memberRef = doc(db, "teams", teamId, "members", user.uid);
+  await runTransaction(db, async (transaction) => {
+    const invitation = await transaction.get(invitationRef);
+    const profile = await transaction.get(profileRef);
+    const data = invitation.data();
+    if (!data || data.status !== "pending") {
+      throw new Error("This invitation is no longer available.");
+    }
+    if (data.email !== user.email.trim().toLowerCase()) {
+      throw new Error(
+        "Sign in with the email address this invitation was sent to.",
+      );
+    }
+    if (
+      !(data.expiresAt instanceof Timestamp) ||
+      data.expiresAt.toMillis() <= Date.now()
+    ) {
+      throw new Error("This invitation has expired.");
+    }
+
+    const profileData = profile.data() || {};
+    const preferredTimezone = profileData.timezone || timezone;
+    const currentTeamIds: string[] =
+      profileData.teamIds ||
+      (profileData.teamId ? [profileData.teamId as string] : []);
+    transaction.set(memberRef, {
+      uid: user.uid,
+      email: user.email.trim().toLowerCase(),
+      displayName: user.displayName || user.email.split("@")[0],
+      photoURL: user.photoURL || null,
+      role: data.role,
+      inviteId: token,
+      timezone: preferredTimezone,
+      joinedAt: serverTimestamp(),
+    });
+    transaction.update(invitationRef, {
+      status: "accepted",
+      acceptedBy: user.uid,
+      acceptedAt: serverTimestamp(),
+    });
+    transaction.set(
+      profileRef,
+      {
+        displayName: user.displayName,
+        email: user.email,
+        photoURL: user.photoURL || null,
+        timezone: preferredTimezone,
+        timezoneSource: profileData.timezoneSource || "detected",
+        timezoneConfirmed: profileData.timezoneConfirmed === true,
+        teamId,
+        teamIds: Array.from(new Set([...currentTeamIds, teamId])),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+  });
+}
+
+export async function addTaskComment(
+  teamId: string,
+  taskId: string,
+  author: { uid: string; name: string; email: string },
+  body: string,
+  parentId?: string,
+) {
+  const batch = writeBatch(db);
+  batch.set(doc(collection(db, "teams", teamId, "tasks", taskId, "comments")), {
+    authorUid: author.uid,
+    authorName: author.name,
+    authorEmail: author.email,
+    body: body.trim(),
+    ...(parentId ? { parentId } : {}),
+    createdAt: serverTimestamp(),
+  });
+  batch.set(doc(collection(db, "teams", teamId, "activity")), {
+    type: "task_comment_created",
+    title: "Added to a task discussion",
+    detail: body.trim().slice(0, 500),
+    actor: author.uid,
+    entityId: taskId,
+    createdAt: serverTimestamp(),
+  });
+  await batch.commit();
+}
 export async function ensureWorkspace(
   uid: string,
   profile: {
@@ -92,6 +225,9 @@ export async function ensureWorkspace(
       timezone,
       timezoneSource: existingProfile.timezoneSource || "detected",
       timezoneConfirmed: existingProfile.timezoneConfirmed === true,
+      teamIds:
+        existingProfile.teamIds ||
+        (existingProfile.teamId ? [existingProfile.teamId] : []),
       updatedAt: serverTimestamp(),
     },
     { merge: true },
@@ -103,7 +239,14 @@ export async function ensureWorkspace(
     if (existingId) return { teamId: existingId, isNew: false };
     transaction.set(
       profileRef,
-      { teamId: proposedTeamRef.id, updatedAt: serverTimestamp() },
+      {
+        teamId: proposedTeamRef.id,
+        teamIds: [
+          ...((snapshot.data()?.teamIds as string[] | undefined) || []),
+          proposedTeamRef.id,
+        ],
+        updatedAt: serverTimestamp(),
+      },
       { merge: true },
     );
     return { teamId: proposedTeamRef.id, isNew: true };

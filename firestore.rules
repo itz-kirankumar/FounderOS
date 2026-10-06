@@ -14,13 +14,28 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/teams/$(teamId)).data.ownerUid == request.auth.uid;
     }
 
+    function isAdmin(teamId) {
+      return isMember(teamId)
+        && get(/databases/$(database)/documents/teams/$(teamId)/members/$(request.auth.uid)).data.role in ['Owner', 'Admin'];
+    }
+
+    function canContribute(teamId) {
+      return isMember(teamId)
+        && get(/databases/$(database)/documents/teams/$(teamId)/members/$(request.auth.uid)).data.role in ['Owner', 'Admin', 'Member'];
+    }
+
+    function validInviteRole(teamId, role) {
+      return role in ['Admin', 'Member', 'Viewer']
+        && (isOwner(teamId) || (isAdmin(teamId) && role in ['Member', 'Viewer']));
+    }
+
     function validCreatedRecord() {
       return request.resource.data.createdBy == request.auth.uid
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
     }
 
-    function validTask() {
+    function validTask(teamId) {
       return request.resource.data.keys().hasAll([
           'title', 'status', 'priority', 'ownerUid', 'dueAt', 'timezone', 'createdBy', 'createdAt', 'updatedAt'
         ])
@@ -34,6 +49,7 @@ service cloud.firestore {
         && request.resource.data.status in ['Backlog', 'Planned', 'In Progress', 'Blocked', 'Completed', 'Cancelled']
         && request.resource.data.priority in ['Low', 'Medium', 'High', 'Critical']
         && request.resource.data.ownerUid is string
+        && exists(/databases/$(database)/documents/teams/$(teamId)/members/$(request.resource.data.ownerUid))
         && request.resource.data.dueAt is timestamp
         && request.resource.data.timezone is string
         && (!('description' in request.resource.data)
@@ -48,7 +64,7 @@ service cloud.firestore {
         && request.auth.uid == userId
         && request.resource.data.keys().hasOnly([
           'displayName', 'email', 'photoURL', 'timezone', 'locale', 'timeFormat',
-          'timezoneSource', 'timezoneConfirmed', 'teamId', 'updatedAt'
+          'timezoneSource', 'timezoneConfirmed', 'teamId', 'teamIds', 'updatedAt'
         ])
         && request.resource.data.updatedAt == request.time;
       allow delete: if false;
@@ -70,43 +86,142 @@ service cloud.firestore {
 
       match /members/{memberId} {
         allow read: if isMember(teamId);
-        allow create: if isOwner(teamId)
+        allow create: if (isOwner(teamId)
+          && memberId == request.auth.uid
           && request.resource.data.uid == memberId
-          && request.resource.data.role in ['Owner', 'Member'];
-        allow update: if isMember(teamId)
-          && isOwner(teamId)
+          && request.resource.data.role == 'Owner'
+          && request.resource.data.keys().hasOnly(['uid', 'displayName', 'email', 'role', 'timezone', 'joinedAt']))
+          || (signedIn()
+          && memberId == request.auth.uid
+          && request.resource.data.uid == memberId
+          && request.resource.data.joinedAt == request.time
+          && exists(/databases/$(database)/documents/teams/$(teamId)/invites/$(request.resource.data.inviteId))
+          && get(/databases/$(database)/documents/teams/$(teamId)/invites/$(request.resource.data.inviteId)).data.status == 'pending'
+          && get(/databases/$(database)/documents/teams/$(teamId)/invites/$(request.resource.data.inviteId)).data.expiresAt > request.time
+          && get(/databases/$(database)/documents/teams/$(teamId)/invites/$(request.resource.data.inviteId)).data.email == request.auth.token.email
+          && request.auth.token.email_verified == true
+          && getAfter(/databases/$(database)/documents/teams/$(teamId)/invites/$(request.resource.data.inviteId)).data.status == 'accepted'
+          && getAfter(/databases/$(database)/documents/teams/$(teamId)/invites/$(request.resource.data.inviteId)).data.acceptedBy == request.auth.uid
+          && request.resource.data.email == request.auth.token.email
+          && request.resource.data.role == get(/databases/$(database)/documents/teams/$(teamId)/invites/$(request.resource.data.inviteId)).data.role
+          && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'role', 'timezone', 'joinedAt', 'inviteId']));
+        allow update: if isAdmin(teamId)
+          && memberId != get(/databases/$(database)/documents/teams/$(teamId)).data.ownerUid
           && request.resource.data.uid == resource.data.uid
+          && request.resource.data.email == resource.data.email
+          && request.resource.data.joinedAt == resource.data.joinedAt
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'displayName', 'email', 'role', 'timezone'
-          ]);
-        allow delete: if isMember(teamId) && isOwner(teamId) && memberId != request.auth.uid;
+            'displayName', 'role', 'timezone'
+          ])
+          && request.resource.data.role in ['Admin', 'Member', 'Viewer']
+          && (isOwner(teamId)
+            || (resource.data.role in ['Member', 'Viewer'] && request.resource.data.role in ['Member', 'Viewer']));
+        allow delete: if isAdmin(teamId)
+          && memberId != request.auth.uid
+          && memberId != get(/databases/$(database)/documents/teams/$(teamId)).data.ownerUid
+          && (isOwner(teamId) || resource.data.role in ['Member', 'Viewer']);
+      }
+
+      match /invites/{inviteId} {
+        allow read: if isAdmin(teamId)
+          || (signedIn() && request.auth.token.email == resource.data.email);
+        allow create: if isAdmin(teamId)
+          && inviteId.matches('^[a-f0-9]{64}$')
+          && request.resource.data.email is string
+          && request.resource.data.email.size() > 3
+          && request.resource.data.email.size() <= 254
+          && request.resource.data.email == request.resource.data.email.lower()
+          && validInviteRole(teamId, request.resource.data.role)
+          && request.resource.data.status == 'pending'
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.expiresAt is timestamp
+          && request.resource.data.expiresAt > request.time
+          && request.resource.data.expiresAt <= request.time + duration.value(7, 'd')
+          && request.resource.data.keys().hasOnly(['email', 'role', 'status', 'createdBy', 'createdAt', 'expiresAt']);
+        allow update: if resource.data.status == 'pending'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status', 'acceptedBy', 'acceptedAt', 'revokedBy', 'revokedAt'
+          ])
+            && ((request.resource.data.status == 'accepted'
+              && signedIn()
+              && request.auth.token.email_verified == true
+              && request.auth.token.email == resource.data.email
+              && resource.data.expiresAt > request.time
+              && request.resource.data.acceptedBy == request.auth.uid
+              && request.resource.data.acceptedAt == request.time
+              && getAfter(/databases/$(database)/documents/teams/$(teamId)/members/$(request.auth.uid)).data.inviteId == inviteId)
+            || (request.resource.data.status == 'revoked'
+              && validInviteRole(teamId, resource.data.role)
+              && request.resource.data.revokedBy == request.auth.uid
+              && request.resource.data.revokedAt == request.time));
+        allow delete: if false;
       }
 
       match /tasks/{taskId} {
         allow read: if isMember(teamId);
-        allow create: if isMember(teamId) && validTask();
-        allow update: if isMember(teamId)
+        allow create: if canContribute(teamId)
+          && validTask(teamId)
+          && (isAdmin(teamId) || request.resource.data.ownerUid == request.auth.uid);
+        allow update: if canContribute(teamId)
+          && (isAdmin(teamId)
+            || resource.data.ownerUid == request.auth.uid
+            || resource.data.createdBy == request.auth.uid
+            || request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'googleCalendarEventId', 'meetingUrl', 'calendarEventUrl', 'meetingStart', 'meetingEnd', 'updatedAt'
+            ]))
           && request.resource.data.createdBy == resource.data.createdBy
           && request.resource.data.createdAt == resource.data.createdAt
           && request.resource.data.updatedAt == request.time
           && request.resource.data.keys().hasOnly([
             'title', 'description', 'status', 'priority', 'ownerUid', 'projectId',
-          'startDate', 'dueAt', 'timezone', 'tags', 'createdBy', 'createdAt', 'updatedAt'
+            'startDate', 'dueAt', 'timezone', 'tags', 'googleCalendarEventId', 'meetingUrl', 'calendarEventUrl', 'meetingStart', 'meetingEnd', 'createdBy', 'createdAt', 'updatedAt'
           ])
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'title', 'description', 'status', 'priority', 'ownerUid', 'projectId',
-            'startDate', 'dueAt', 'timezone', 'tags', 'updatedAt'
+            'startDate', 'dueAt', 'timezone', 'tags', 'googleCalendarEventId', 'meetingUrl', 'calendarEventUrl', 'meetingStart', 'meetingEnd', 'updatedAt'
           ])
           && request.resource.data.status in ['Backlog', 'Planned', 'In Progress', 'Blocked', 'Completed', 'Cancelled']
           && request.resource.data.priority in ['Low', 'Medium', 'High', 'Critical']
           && request.resource.data.dueAt is timestamp
-          && request.resource.data.timezone is string;
+          && request.resource.data.timezone is string
+          && exists(/databases/$(database)/documents/teams/$(teamId)/members/$(request.resource.data.ownerUid))
+          && (!('description' in request.resource.data)
+            || (request.resource.data.description is string && request.resource.data.description.size() <= 5000))
+          && (!('meetingUrl' in request.resource.data)
+            || (request.resource.data.meetingUrl is string
+              && (request.resource.data.meetingUrl == '' || request.resource.data.meetingUrl.matches('https://meet\\.google\\.com/.*'))))
+          && (!('googleCalendarEventId' in request.resource.data)
+            || (request.resource.data.googleCalendarEventId is string && request.resource.data.googleCalendarEventId.size() <= 1024))
+          && (!('calendarEventUrl' in request.resource.data)
+            || (request.resource.data.calendarEventUrl is string
+              && (request.resource.data.calendarEventUrl == '' || request.resource.data.calendarEventUrl.matches('https://calendar\\.google\\.com/.*'))))
+          && (!('meetingStart' in request.resource.data) || request.resource.data.meetingStart is timestamp)
+          && (!('meetingEnd' in request.resource.data) || request.resource.data.meetingEnd is timestamp);
         allow delete: if false;
+
+        match /comments/{commentId} {
+          allow read: if isMember(teamId);
+          allow create: if canContribute(teamId)
+            && request.resource.data.authorUid == request.auth.uid
+            && request.resource.data.authorEmail == request.auth.token.email
+            && request.resource.data.body is string
+            && request.resource.data.body.size() > 0
+            && request.resource.data.body.size() <= 5000
+            && request.resource.data.createdAt == request.time
+            && request.resource.data.keys().hasOnly(['authorUid', 'authorName', 'authorEmail', 'body', 'parentId', 'createdAt'])
+            && (!('parentId' in request.resource.data)
+              || (request.resource.data.parentId is string
+                && exists(/databases/$(database)/documents/teams/$(teamId)/tasks/$(taskId)/comments/$(request.resource.data.parentId))));
+          allow update, delete: if false;
+        }
       }
 
       match /commitments/{commitmentId} {
         allow read: if isMember(teamId);
-        allow create: if isMember(teamId)
+        allow create: if canContribute(teamId)
+          && exists(/databases/$(database)/documents/teams/$(teamId)/members/$(request.resource.data.ownerUid))
+          && (isAdmin(teamId) || request.resource.data.ownerUid == request.auth.uid)
           && validCreatedRecord()
           && request.resource.data.keys().hasAll(['description', 'status', 'priority', 'ownerUid', 'dueAt', 'timezone', 'createdBy', 'createdAt', 'updatedAt'])
           && request.resource.data.keys().hasOnly([
@@ -120,7 +235,8 @@ service cloud.firestore {
           && request.resource.data.dueAt is timestamp
           && request.resource.data.timezone is string
           && request.resource.data.priority in ['Low', 'Medium', 'High', 'Critical'];
-        allow update: if isMember(teamId)
+        allow update: if canContribute(teamId)
+          && (isAdmin(teamId) || resource.data.ownerUid == request.auth.uid)
           && request.resource.data.createdBy == resource.data.createdBy
           && request.resource.data.createdAt == resource.data.createdAt
           && request.resource.data.updatedAt == request.time
@@ -135,7 +251,7 @@ service cloud.firestore {
 
       match /projects/{projectId} {
         allow read: if isMember(teamId);
-        allow create: if isMember(teamId)
+        allow create: if isAdmin(teamId)
           && validCreatedRecord()
           && request.resource.data.keys().hasAll(['title', 'status', 'createdBy', 'createdAt', 'updatedAt'])
           && request.resource.data.keys().hasOnly([
@@ -148,7 +264,7 @@ service cloud.firestore {
             || (request.resource.data.description is string
               && request.resource.data.description.size() <= 5000))
           && request.resource.data.status in ['Active', 'Completed', 'On Hold'];
-        allow update: if isMember(teamId)
+        allow update: if isAdmin(teamId)
           && request.resource.data.createdBy == resource.data.createdBy
           && request.resource.data.createdAt == resource.data.createdAt
           && request.resource.data.updatedAt == request.time
@@ -161,7 +277,7 @@ service cloud.firestore {
 
       match /activity/{activityId} {
         allow read: if isMember(teamId);
-        allow create: if isMember(teamId)
+        allow create: if canContribute(teamId)
           && request.resource.data.actor == request.auth.uid
           && request.resource.data.createdAt == request.time
           && request.resource.data.keys().hasAll(['type', 'title', 'actor', 'entityId', 'createdAt'])

@@ -11,12 +11,14 @@ import {
 import {
   collection,
   doc,
+  getDoc,
   limit,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
   updateDoc,
+  writeBatch,
 } from "firebase/firestore";
 import {
   Activity,
@@ -36,6 +38,7 @@ import {
   Menu,
   Plus,
   Search,
+  Send,
   Settings,
   ShieldCheck,
   Sparkles,
@@ -52,6 +55,13 @@ import {
 } from "@/lib/firebase";
 import { addItem, changeTask, ensureWorkspace, type Item } from "@/lib/data";
 import {
+  acceptInvitation,
+  addTaskComment,
+  createInvitation,
+  type TeamRole,
+} from "@/lib/data";
+import { scheduleGoogleMeeting } from "@/lib/google-calendar";
+import {
   dateKeyInTimezone,
   detectBrowserTimezone,
   formatDateInTimezone,
@@ -66,9 +76,11 @@ const nav = [
     items: [
       { name: "Overview", icon: LayoutDashboard },
       { name: "My tasks", icon: ListTodo },
+      { name: "Team tasks", icon: Users },
       { name: "Commitments", icon: Target },
       { name: "Projects", icon: FolderKanban },
       { name: "Calendar", icon: CalendarDays },
+      { name: "Meetings", icon: CalendarDays },
       { name: "Activity", icon: Activity },
     ],
   },
@@ -123,6 +135,30 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null),
     [teamId, setTeamId] = useState(""),
     [profile, setProfile] = useState<any>(null);
+  const [members, setMembers] = useState<Item[]>([]);
+  const [workspaces, setWorkspaces] = useState<Item[]>([]);
+  const [invitations, setInvitations] = useState<Item[]>([]);
+  const [memberRole, setMemberRole] = useState<TeamRole>("Member");
+  const [teamName, setTeamName] = useState("");
+  const [pendingInvite, setPendingInvite] = useState<{
+    teamId: string;
+    token: string;
+  } | null>(null);
+  const [inviteError, setInviteError] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] =
+    useState<Exclude<TeamRole, "Owner">>("Member");
+  const [inviteLink, setInviteLink] = useState("");
+  const [selectedTask, setSelectedTask] = useState<Item | null>(null);
+  const [taskComments, setTaskComments] = useState<Item[]>([]);
+  const [commentDraft, setCommentDraft] = useState("");
+  const [replyTo, setReplyTo] = useState<Item | null>(null);
+  const [description, setDescription] = useState("");
+  const [attendeeEmails, setAttendeeEmails] = useState("");
+  const [meetingStart, setMeetingStart] = useState("");
+  const [meetingEnd, setMeetingEnd] = useState("");
+  const inviteAttempt = useRef("");
+  const revocationHandled = useRef("");
   const [section, setSection] = useState("Overview"),
     [tasks, setTasks] = useState<Item[]>([]),
     [commitments, setCommitments] = useState<Item[]>([]),
@@ -132,6 +168,7 @@ export default function Home() {
     [title, setTitle] = useState(""),
     [due, setDue] = useState(""),
     [priority, setPriority] = useState("Medium"),
+    [taskOwnerUid, setTaskOwnerUid] = useState(""),
     [busy, setBusy] = useState(false),
     [mobileNav, setMobileNav] = useState(false),
     [toast, setToast] = useState("");
@@ -150,6 +187,12 @@ export default function Home() {
     setDetectedZone(detected);
     setZone(detected);
     setTimezoneDraft(detected);
+    const params = new URLSearchParams(window.location.search);
+    const invitedTeam = params.get("team");
+    const inviteToken = params.get("invite");
+    if (invitedTeam && inviteToken) {
+      setPendingInvite({ teamId: invitedTeam, token: inviteToken });
+    }
     return onAuthStateChanged(auth, setUser);
   }, []);
   useEffect(() => {
@@ -169,12 +212,50 @@ export default function Home() {
   useEffect(() => {
     if (!user) {
       setTeamId("");
+      setMembers([]);
+      setInvitations([]);
+      inviteAttempt.current = "";
       checkedTimezoneUid.current = "";
       setTimezonePrompt(null);
       return;
     }
     let live = true;
     const timezone = zone;
+    if (pendingInvite) {
+      const attempt = `${user.uid}:${pendingInvite.teamId}:${pendingInvite.token}`;
+      if (inviteAttempt.current === attempt) return;
+      inviteAttempt.current = attempt;
+      acceptInvitation(
+        pendingInvite.teamId,
+        pendingInvite.token,
+        {
+          uid: user.uid,
+          email: user.email || "",
+          displayName: user.displayName || "",
+          photoURL: user.photoURL,
+        },
+        timezone,
+      )
+        .then(() => {
+          if (auth.currentUser?.uid !== user.uid) return;
+          setInviteError("");
+          setTeamId(pendingInvite.teamId);
+          setPendingInvite(null);
+          window.history.replaceState({}, "", window.location.pathname);
+          setToast("You joined the team workspace");
+        })
+        .catch((error: unknown) => {
+          if (auth.currentUser?.uid !== user.uid) return;
+          setInviteError(
+            error instanceof Error
+              ? error.message
+              : "Could not accept this invitation.",
+          );
+        });
+      return () => {
+        live = false;
+      };
+    }
     ensureWorkspace(user.uid, {
       displayName: user.displayName || "Founder",
       email: user.email || "demo@founderos.local",
@@ -188,7 +269,7 @@ export default function Home() {
     return () => {
       live = false;
     };
-  }, [user, zone]);
+  }, [user, zone, pendingInvite]);
   useEffect(() => {
     if (!teamId) return;
     const subs = [
@@ -249,13 +330,424 @@ export default function Home() {
     ];
     return () => subs.forEach((unsub) => unsub());
   }, [teamId, user, detectedZone]);
+  useEffect(() => {
+    if (!teamId || !user) return;
+    const unsubscribeMembers = onSnapshot(
+      query(
+        collection(db, "teams", teamId, "members"),
+        orderBy("joinedAt", "asc"),
+      ),
+      (snapshot) => {
+        const nextMembers = snapshot.docs.map(
+          (entry) => ({ id: entry.id, ...entry.data() }) as Item,
+        );
+        setMembers(nextMembers);
+        setMemberRole(
+          (nextMembers.find((member) => member.id === user.uid)?.role ||
+            "Member") as TeamRole,
+        );
+      },
+    );
+    const unsubscribeTeam = onSnapshot(doc(db, "teams", teamId), (snapshot) => {
+      setTeamName(snapshot.data()?.name || "Founder workspace");
+    });
+    return () => {
+      unsubscribeMembers();
+      unsubscribeTeam();
+    };
+  }, [teamId, user]);
+  useEffect(() => {
+    if (!user || !profile) return;
+    const ids = Array.from(
+      new Set<string>([
+        ...(Array.isArray(profile.teamIds) ? profile.teamIds : []),
+        ...(profile.teamId ? [profile.teamId] : []),
+      ]),
+    );
+    let active = true;
+    Promise.all(
+      ids.map(async (id) => {
+        try {
+          const snapshot = await getDoc(doc(db, "teams", id));
+          return snapshot.exists()
+            ? ({
+                id,
+                name: snapshot.data().name || "Founder workspace",
+              } as Item)
+            : null;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((results) => {
+      if (active)
+        setWorkspaces(results.filter((entry): entry is Item => entry !== null));
+    });
+    return () => {
+      active = false;
+    };
+  }, [user, profile]);
+  useEffect(() => {
+    if (!teamId || !user) return;
+    let active = true;
+    const unsubscribe = onSnapshot(
+      doc(db, "teams", teamId, "members", user.uid),
+      () => {
+        revocationHandled.current = "";
+      },
+      async (error) => {
+        if (error.code !== "permission-denied" || !active) {
+          setToast("Could not verify team membership. Check your connection.");
+          return;
+        }
+        if (revocationHandled.current === `${user.uid}:${teamId}`) return;
+        revocationHandled.current = `${user.uid}:${teamId}`;
+        const alternate = workspaces.find(
+          (workspace) => workspace.id !== teamId,
+        );
+        try {
+          if (alternate) {
+            await updateDoc(doc(db, "users", user.uid), {
+              teamId: alternate.id,
+              updatedAt: serverTimestamp(),
+            });
+            if (active) {
+              setTeamId(alternate.id);
+              setToast("Your access changed. Switched to another workspace.");
+            }
+          } else {
+            await updateDoc(doc(db, "users", user.uid), {
+              teamId: "",
+              teamIds: workspaces
+                .map((workspace) => workspace.id)
+                .filter((id) => id !== teamId),
+              updatedAt: serverTimestamp(),
+            });
+            const nextTeamId = await ensureWorkspace(user.uid, {
+              displayName: user.displayName || "Founder",
+              email: user.email || "founder@founderos.local",
+              photoURL: user.photoURL,
+              timezone: zone,
+            });
+            if (active) {
+              setTeamId(nextTeamId);
+              setToast(
+                "Your previous access ended. A private workspace is ready.",
+              );
+            }
+          }
+        } catch {
+          if (active)
+            setToast("Your team access changed. Sign out and sign in again.");
+        }
+      },
+    );
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [teamId, user, workspaces, zone]);
+  const canManageTeam = memberRole === "Owner" || memberRole === "Admin";
+  useEffect(() => {
+    if (!teamId || !canManageTeam) {
+      setInvitations([]);
+      return;
+    }
+    return onSnapshot(
+      query(
+        collection(db, "teams", teamId, "invites"),
+        orderBy("createdAt", "desc"),
+      ),
+      (snapshot) =>
+        setInvitations(
+          snapshot.docs.map(
+            (entry) => ({ id: entry.id, ...entry.data() }) as Item,
+          ),
+        ),
+    );
+  }, [teamId, canManageTeam]);
+  useEffect(() => {
+    if (!teamId || !selectedTask) {
+      setTaskComments([]);
+      return;
+    }
+    return onSnapshot(
+      query(
+        collection(db, "teams", teamId, "tasks", selectedTask.id, "comments"),
+        orderBy("createdAt", "desc"),
+        limit(100),
+      ),
+      (snapshot) =>
+        setTaskComments(
+          snapshot.docs
+            .map((entry) => ({ id: entry.id, ...entry.data() }) as Item)
+            .reverse(),
+        ),
+    );
+  }, [teamId, selectedTask]);
   const open = (kind: string) => {
+    if (memberRole === "Viewer") {
+      setToast("Viewer access is read-only.");
+      return;
+    }
+    if (kind === "project" && !canManageTeam) {
+      setToast("Only Owners and Admins can manage projects.");
+      return;
+    }
     setTitle("");
     setDue("");
     setPriority("Medium");
+    setDescription("");
+    setTaskOwnerUid(user?.uid || "");
     setModal(kind);
   };
+  const dismissInvite = () => {
+    setPendingInvite(null);
+    setInviteError("");
+    inviteAttempt.current = "";
+    window.history.replaceState({}, "", window.location.pathname);
+  };
+  const switchWorkspace = async (nextTeamId: string) => {
+    if (!user || !nextTeamId || nextTeamId === teamId) return;
+    try {
+      await updateDoc(doc(db, "users", user.uid), {
+        teamId: nextTeamId,
+        updatedAt: serverTimestamp(),
+      });
+      setTeamId(nextTeamId);
+      setInviteLink("");
+      setSection("Overview");
+      setToast("Workspace switched");
+    } catch {
+      setToast("Could not switch workspace. Membership may have changed.");
+    }
+  };
+  const inviteTeammate = async () => {
+    if (!user || !teamId || !inviteEmail.trim()) return;
+    const normalizedEmail = inviteEmail.trim().toLowerCase();
+    if (
+      members.some((member) => member.email?.toLowerCase() === normalizedEmail)
+    ) {
+      setToast("That person is already a team member.");
+      return;
+    }
+    if (
+      invitations.some(
+        (invite) =>
+          invite.email === normalizedEmail &&
+          invite.status === "pending" &&
+          invite.expiresAt?.toMillis?.() > Date.now(),
+      )
+    ) {
+      setToast(
+        "There is already a pending invite for that email. Revoke it before creating another.",
+      );
+      return;
+    }
+    setBusy(true);
+    try {
+      const token = await createInvitation(
+        teamId,
+        inviteEmail,
+        inviteRole,
+        user.uid,
+      );
+      const url = new URL(window.location.origin);
+      url.searchParams.set("team", teamId);
+      url.searchParams.set("invite", token);
+      setInviteLink(url.toString());
+      setInviteEmail("");
+      setToast("Invitation link created · valid for 7 days");
+    } catch (error) {
+      setToast(
+        error instanceof Error ? error.message : "Could not create invitation.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const copyInviteLink = async () => {
+    try {
+      await navigator.clipboard.writeText(inviteLink);
+      setToast("Invitation link copied");
+    } catch {
+      setToast("Copy failed. Select and copy the invitation link.");
+    }
+  };
+  const changeMemberRole = async (member: Item, role: TeamRole) => {
+    if (!teamId || !user) return;
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, "teams", teamId, "members", member.id), { role });
+      batch.set(doc(collection(db, "teams", teamId, "activity")), {
+        type: "team_role_changed",
+        title: "Updated a team role",
+        detail: `${member.displayName || member.email}: ${member.role} → ${role}`,
+        actor: user.uid,
+        entityId: member.id,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      setToast(`${member.displayName || member.email} is now ${role}`);
+    } catch {
+      setToast("You do not have permission to change this role.");
+    }
+  };
+  const removeMember = async (member: Item) => {
+    if (
+      !teamId ||
+      !user ||
+      !window.confirm(
+        `Remove ${member.displayName || member.email} from this workspace?`,
+      )
+    )
+      return;
+    try {
+      const batch = writeBatch(db);
+      batch.delete(doc(db, "teams", teamId, "members", member.id));
+      batch.set(doc(collection(db, "teams", teamId, "activity")), {
+        type: "team_member_removed",
+        title: "Removed a team member",
+        detail: member.displayName || "A team member",
+        actor: user.uid,
+        entityId: member.id,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      setToast("Team member removed");
+    } catch {
+      setToast("You do not have permission to remove this member.");
+    }
+  };
+  const revokeInvitation = async (invite: Item) => {
+    if (!teamId || !user) return;
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, "teams", teamId, "invites", invite.id), {
+        status: "revoked",
+        revokedBy: user.uid,
+        revokedAt: serverTimestamp(),
+      });
+      batch.set(doc(collection(db, "teams", teamId, "activity")), {
+        type: "team_invitation_revoked",
+        title: "Revoked a team invitation",
+        actor: user.uid,
+        entityId: "team",
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      if (inviteLink.includes(encodeURIComponent(invite.id))) setInviteLink("");
+      setToast("Invitation revoked");
+    } catch {
+      setToast("You do not have permission to revoke this invitation.");
+    }
+  };
+  const postTaskComment = async () => {
+    if (!user || !teamId || !selectedTask || !commentDraft.trim()) return;
+    setBusy(true);
+    try {
+      await addTaskComment(
+        teamId,
+        selectedTask.id,
+        {
+          uid: user.uid,
+          name: user.displayName || user.email || "Teammate",
+          email: user.email || "",
+        },
+        commentDraft,
+        replyTo?.id,
+      );
+      setCommentDraft("");
+      setReplyTo(null);
+    } catch {
+      setToast("Could not post this discussion. Check your team role.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const saveTaskDescription = async () => {
+    if (!teamId || !selectedTask || !user) return;
+    setBusy(true);
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, "teams", teamId, "tasks", selectedTask.id), {
+        description: description.trim(),
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(collection(db, "teams", teamId, "activity")), {
+        type: "task_details_updated",
+        title: "Updated task details",
+        detail: selectedTask.title,
+        actor: user.uid,
+        entityId: selectedTask.id,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      setSelectedTask({ ...selectedTask, description: description.trim() });
+      setToast("Task details saved");
+    } catch {
+      setToast("Could not save task details.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const createMeeting = async () => {
+    if (!teamId || !selectedTask || !meetingStart || !meetingEnd || !user)
+      return;
+    setBusy(true);
+    try {
+      const meeting = await scheduleGoogleMeeting({
+        title: `FounderOS · ${selectedTask.title}`,
+        description: selectedTask.description || selectedTask.title,
+        start: toUtcInstant(meetingStart, zone),
+        end: toUtcInstant(meetingEnd, zone),
+        timezone: zone,
+        attendeeEmails: attendeeEmails
+          .split(/[\s,;]+/)
+          .map((email) => email.trim())
+          .filter(Boolean),
+      });
+      const batch = writeBatch(db);
+      batch.update(doc(db, "teams", teamId, "tasks", selectedTask.id), {
+        googleCalendarEventId: meeting.eventId,
+        meetingUrl: meeting.meetUrl,
+        calendarEventUrl: meeting.htmlLink || "",
+        meetingStart: toUtcInstant(meetingStart, zone),
+        meetingEnd: toUtcInstant(meetingEnd, zone),
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(collection(db, "teams", teamId, "activity")), {
+        type: "meeting_scheduled",
+        title: "Scheduled a Google Calendar meeting",
+        detail: selectedTask.title,
+        actor: user.uid,
+        entityId: selectedTask.id,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      setSelectedTask({
+        ...selectedTask,
+        meetingUrl: meeting.meetUrl,
+        calendarEventUrl: meeting.htmlLink || "",
+        googleCalendarEventId: meeting.eventId,
+      });
+      setToast(
+        meeting.meetUrl
+          ? "Google Calendar meeting scheduled"
+          : "Calendar event scheduled; Meet link is still being prepared",
+      );
+    } catch (error) {
+      setToast(
+        error instanceof Error
+          ? error.message
+          : "Could not schedule the meeting.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
   const create = async () => {
+    if (memberRole === "Viewer") return;
     if (!title.trim() || !teamId || !user || (modal !== "project" && !due))
       return;
     setBusy(true);
@@ -272,18 +764,24 @@ export default function Home() {
               description: title.trim(),
               status: "Active",
               priority,
-              ownerUid: user.uid,
+              ownerUid: taskOwnerUid || user.uid,
               dueAt: toUtcInstant(due, zone),
               timezone: zone,
             }
           : {
               title: title.trim(),
+              ...(description.trim()
+                ? { description: description.trim() }
+                : {}),
               status: modal === "project" ? "Active" : "Planned",
-              priority,
-              ownerUid: user.uid,
               ...(modal === "project"
                 ? {}
-                : { dueAt: toUtcInstant(due, zone), timezone: zone }),
+                : {
+                    priority,
+                    ownerUid: taskOwnerUid || user.uid,
+                    dueAt: toUtcInstant(due, zone),
+                    timezone: zone,
+                  }),
             },
         user.uid,
       );
@@ -364,6 +862,67 @@ export default function Home() {
     ...weeklyDays.map((day) => day.count),
   );
 
+  if (user && inviteError)
+    return (
+      <main className="login-shell invite-gate">
+        <section className="login-panel">
+          <div className="login-box">
+            <div className="login-logo">
+              <div className="brand-mark">
+                <Users size={17} />
+              </div>
+              <span>FounderOS</span>
+            </div>
+            <div className="login-heading">
+              <p className="eyebrow">TEAM INVITATION</p>
+              <h2>We couldn’t join this workspace.</h2>
+              <p>{inviteError}</p>
+            </div>
+            <button className="primary-button" onClick={dismissInvite}>
+              Create my own workspace <ArrowRight size={14} />
+            </button>
+            <button className="secondary-button" onClick={() => signOut(auth)}>
+              Sign out
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  if (user && !teamId)
+    return (
+      <main className="login-shell invite-gate">
+        <section className="login-panel">
+          <div className="login-box">
+            <div className="login-logo">
+              <div className="brand-mark">
+                <Command size={17} />
+              </div>
+              <span>FounderOS</span>
+            </div>
+            <div className="login-heading">
+              <p className="eyebrow">
+                {pendingInvite ? "TEAM INVITATION" : "YOUR WORKSPACE"}
+              </p>
+              <h2>
+                {pendingInvite
+                  ? "Joining your team…"
+                  : "Preparing your workspace…"}
+              </h2>
+              <p>
+                {pendingInvite
+                  ? "We’re verifying your invitation and setting up your access."
+                  : "Your private workspace is getting ready."}
+              </p>
+            </div>
+            {pendingInvite && (
+              <button className="secondary-button" onClick={dismissInvite}>
+                Continue without this invite
+              </button>
+            )}
+          </div>
+        </section>
+      </main>
+    );
   if (!user)
     return (
       <main className="login-shell">
@@ -432,8 +991,12 @@ export default function Home() {
             </div>
             <div className="login-heading">
               <p className="eyebrow">YOUR TEAM, IN SYNC</p>
-              <h2>Welcome back.</h2>
-              <p>Sign in to pick up where your team left off.</p>
+              <h2>{pendingInvite ? "Join your team." : "Welcome back."}</h2>
+              <p>
+                {pendingInvite
+                  ? "Sign in with the email address this invitation was sent to."
+                  : "Sign in to pick up where your team left off."}
+              </p>
             </div>
             <button
               className="google-button"
@@ -490,11 +1053,23 @@ export default function Home() {
     );
 
   const rows =
-    section === "Commitments"
-      ? commitments
-      : section === "Projects"
-        ? projects
-        : tasks;
+    section === "My tasks"
+      ? tasks.filter((task) => task.ownerUid === user.uid)
+      : section === "Team tasks"
+        ? tasks
+        : section === "Commitments"
+          ? commitments
+          : section === "Projects"
+            ? projects
+            : tasks;
+  const taskAssignees = canManageTeam
+    ? members
+    : members.filter((member) => member.id === user.uid);
+  const canEditSelectedTask =
+    memberRole === "Owner" ||
+    memberRole === "Admin" ||
+    selectedTask?.ownerUid === user.uid ||
+    selectedTask?.createdBy === user.uid;
   const filteredRows = rows.filter((item) => {
     const matchesSearch = `${item.title || ""} ${item.description || ""}`
       .toLowerCase()
@@ -506,6 +1081,17 @@ export default function Home() {
   const scheduledItems = [...tasks, ...commitments]
     .filter((item) => dueInstant(item) && item.status !== "Completed")
     .sort((a, b) => dueInstant(a)!.getTime() - dueInstant(b)!.getTime());
+  const scheduledMeetings = tasks
+    .filter((task) => task.meetingStart && task.status !== "Cancelled")
+    .sort((first, second) => {
+      const firstDate = first.meetingStart?.toDate
+        ? first.meetingStart.toDate()
+        : new Date(first.meetingStart);
+      const secondDate = second.meetingStart?.toDate
+        ? second.meetingStart.toDate()
+        : new Date(second.meetingStart);
+      return firstDate.getTime() - secondDate.getTime();
+    });
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileNav ? "show" : ""}`}>
@@ -522,13 +1108,29 @@ export default function Home() {
           <div className="workspace-icon">
             {(profile?.displayName || displayName).slice(0, 1).toUpperCase()}
           </div>
-          <div>
-            <b>
-              {profile?.displayName
-                ? `${profile.displayName}'s workspace`
-                : `${displayName}’s workspace`}
-            </b>
-            <small>Founder workspace</small>
+          <div className="workspace-switch-copy">
+            <select
+              className="workspace-select"
+              aria-label="Active workspace"
+              value={teamId}
+              disabled={workspaces.length < 2}
+              onChange={(event) => switchWorkspace(event.target.value)}
+            >
+              {(workspaces.length
+                ? workspaces
+                : [
+                    {
+                      id: teamId,
+                      name: teamName || `${displayName}’s workspace`,
+                    },
+                  ]
+              ).map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.name}
+                </option>
+              ))}
+            </select>
+            <small>{memberRole} workspace</small>
           </div>
           <ChevronDown size={14} />
         </div>
@@ -633,7 +1235,11 @@ export default function Home() {
                   ? "Here’s what’s moving in your workspace today."
                   : section === "My tasks"
                     ? "Your work, priorities, and the next thing to move forward."
-                    : `Keep your team's ${section.toLowerCase()} clear and moving forward.`}
+                    : section === "Team"
+                      ? "Invite teammates and manage workspace roles."
+                      : section === "Meetings"
+                        ? "Schedule Google Calendar meetings from the tasks your team is doing."
+                        : `Keep ${section.toLowerCase()} clear and moving forward.`}
               </p>
             </div>
             <button
@@ -782,7 +1388,20 @@ export default function Home() {
                         key={t.id}
                         item={t}
                         timezone={zone}
+                        readOnly={
+                          memberRole === "Viewer" ||
+                          (memberRole === "Member" &&
+                            t.ownerUid !== user.uid &&
+                            t.createdBy !== user.uid)
+                        }
                         onNext={async () => {
+                          if (
+                            memberRole === "Viewer" ||
+                            (memberRole === "Member" &&
+                              t.ownerUid !== user.uid &&
+                              t.createdBy !== user.uid)
+                          )
+                            return;
                           const next =
                             statuses[
                               (statuses.indexOf(t.status) + 1) % statuses.length
@@ -808,7 +1427,11 @@ export default function Home() {
                       />
                     )}
                   </div>
-                  <button className="add-inline" onClick={() => open("task")}>
+                  <button
+                    className="add-inline"
+                    disabled={memberRole === "Viewer"}
+                    onClick={() => open("task")}
+                  >
                     <Plus size={15} /> Add a task
                   </button>
                 </section>
@@ -1002,18 +1625,155 @@ export default function Home() {
                   <div className="panel-kicker">YOUR PEOPLE</div>
                   <h2>Team members</h2>
                 </div>
-                <span className="secure-chip">Invitations are not enabled</span>
+                <span className="secure-chip">
+                  {members.length} {members.length === 1 ? "member" : "members"}
+                </span>
               </div>
-              <div className="member-row">
-                <div className="profile-avatar">
-                  {displayName.slice(0, 1).toUpperCase()}
+              {members.map((member) => (
+                <div className="member-row" key={member.id}>
+                  <div className="profile-avatar">
+                    {(member.displayName || member.email || "?")
+                      .slice(0, 1)
+                      .toUpperCase()}
+                  </div>
+                  <div className="member-copy">
+                    <b>
+                      {member.displayName || "FounderOS member"}
+                      {member.id === user.uid ? " · You" : ""}
+                    </b>
+                    <small>{member.email}</small>
+                  </div>
+                  {canManageTeam &&
+                  member.id !== user.uid &&
+                  member.role !== "Owner" ? (
+                    <div className="member-controls">
+                      <select
+                        aria-label={`Role for ${member.email}`}
+                        value={member.role}
+                        onChange={(event) =>
+                          changeMemberRole(
+                            member,
+                            event.target.value as TeamRole,
+                          )
+                        }
+                      >
+                        {(memberRole === "Owner"
+                          ? ["Admin", "Member", "Viewer"]
+                          : ["Member", "Viewer"]
+                        ).map((role) => (
+                          <option key={role}>{role}</option>
+                        ))}
+                      </select>
+                      {(memberRole === "Owner" ||
+                        ["Member", "Viewer"].includes(member.role)) && (
+                        <button
+                          className="text-action danger-action"
+                          onClick={() => removeMember(member)}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="role-chip">{member.role}</span>
+                  )}
                 </div>
-                <div>
-                  <b>{user.displayName || "Demo Founder"}</b>
-                  <small>{user.email || "Local demo account"} · Owner</small>
+              ))}
+              {canManageTeam ? (
+                <div className="invite-panel">
+                  <div className="panel-kicker">INVITE BY LINK</div>
+                  <p>
+                    Links are single-use and expire after 7 days. Share them
+                    only with the invited person.
+                  </p>
+                  <div className="invite-form">
+                    <input
+                      type="email"
+                      autoComplete="email"
+                      placeholder="teammate@company.com"
+                      value={inviteEmail}
+                      onChange={(event) => setInviteEmail(event.target.value)}
+                    />
+                    <select
+                      value={inviteRole}
+                      onChange={(event) =>
+                        setInviteRole(
+                          event.target.value as Exclude<TeamRole, "Owner">,
+                        )
+                      }
+                      aria-label="Invited role"
+                    >
+                      {(memberRole === "Owner"
+                        ? ["Admin", "Member", "Viewer"]
+                        : ["Member", "Viewer"]
+                      ).map((role) => (
+                        <option key={role}>{role}</option>
+                      ))}
+                    </select>
+                    <button
+                      className="primary-button"
+                      disabled={busy || !inviteEmail.trim() || !user.email}
+                      onClick={inviteTeammate}
+                    >
+                      <Send size={14} /> Create link
+                    </button>
+                  </div>
+                  {!user.email && (
+                    <small className="form-hint">
+                      A verified email account is required to invite teammates.
+                    </small>
+                  )}
+                  {inviteLink && (
+                    <div className="invite-link-row">
+                      <input
+                        readOnly
+                        value={inviteLink}
+                        aria-label="Invitation link"
+                      />
+                      <button
+                        className="secondary-button"
+                        onClick={copyInviteLink}
+                      >
+                        Copy link
+                      </button>
+                    </div>
+                  )}
+                  <div className="invite-list">
+                    {invitations
+                      .filter((invite) => invite.status === "pending")
+                      .map((invite) => (
+                        <div className="invite-item" key={invite.id}>
+                          <div>
+                            <b>{invite.email}</b>
+                            <small>
+                              {invite.role} · expires{" "}
+                              {invite.expiresAt?.toDate
+                                ? formatDateInTimezone(
+                                    invite.expiresAt.toDate(),
+                                    zone,
+                                  )
+                                : "in 7 days"}
+                            </small>
+                          </div>
+                          <button
+                            className="text-action danger-action"
+                            onClick={() => revokeInvitation(invite)}
+                          >
+                            Revoke
+                          </button>
+                        </div>
+                      ))}
+                  </div>
                 </div>
-                <span className="secure-chip">Workspace owner</span>
-              </div>
+              ) : (
+                <div className="invite-panel">
+                  <div className="panel-kicker">TEAM PERMISSIONS</div>
+                  <p>
+                    Your <b>{memberRole}</b> role controls whether you can
+                    change workspace content or manage members.
+                  </p>
+                </div>
+              )}
             </div>
           ) : section === "Settings" ? (
             <div className="panel simple-panel">
@@ -1087,6 +1847,108 @@ export default function Home() {
                   action={() => open("task")}
                 />
               )}
+              <div className="meeting-calendar-list">
+                <div className="panel-kicker">SCHEDULED MEETINGS</div>
+                {scheduledMeetings.map((meeting) => (
+                  <div className="settings-line" key={meeting.id}>
+                    <div>
+                      <b>{meeting.title}</b>
+                      <small>
+                        {formatInstantInTimezone(
+                          meeting.meetingStart?.toDate
+                            ? meeting.meetingStart.toDate()
+                            : new Date(meeting.meetingStart),
+                          zone,
+                        )}{" "}
+                        · task meeting
+                      </small>
+                    </div>
+                    {meeting.meetingUrl ? (
+                      <a
+                        className="meeting-link"
+                        href={meeting.meetingUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Join <ArrowRight size={13} />
+                      </a>
+                    ) : (
+                      meeting.calendarEventUrl && (
+                        <a
+                          className="meeting-link"
+                          href={meeting.calendarEventUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Open event <ArrowRight size={13} />
+                        </a>
+                      )
+                    )}
+                  </div>
+                ))}
+                {!scheduledMeetings.length && (
+                  <p className="form-hint">
+                    No meetings scheduled yet. Open a task to schedule one.
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : section === "Meetings" ? (
+            <div className="panel simple-panel">
+              <div className="panel-kicker">GOOGLE CALENDAR</div>
+              <h2>Team meetings</h2>
+              <p className="meetings-intro">
+                Google Calendar meetings linked to team tasks, shown in {zone}.
+              </p>
+              {scheduledMeetings.map((meeting) => (
+                <div className="settings-line" key={meeting.id}>
+                  <div>
+                    <b>{meeting.title}</b>
+                    <small>
+                      {formatInstantInTimezone(
+                        meeting.meetingStart?.toDate
+                          ? meeting.meetingStart.toDate()
+                          : new Date(meeting.meetingStart),
+                        zone,
+                      )}{" "}
+                      –{" "}
+                      {formatInstantInTimezone(
+                        meeting.meetingEnd?.toDate
+                          ? meeting.meetingEnd.toDate()
+                          : new Date(meeting.meetingEnd),
+                        zone,
+                      )}
+                    </small>
+                  </div>
+                  {meeting.meetingUrl ? (
+                    <a
+                      className="meeting-link"
+                      href={meeting.meetingUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Join Google Meet <ArrowRight size={13} />
+                    </a>
+                  ) : (
+                    meeting.calendarEventUrl && (
+                      <a
+                        className="meeting-link"
+                        href={meeting.calendarEventUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open Calendar event <ArrowRight size={13} />
+                      </a>
+                    )
+                  )}
+                </div>
+              ))}
+              {!scheduledMeetings.length && (
+                <Empty
+                  title="No team meetings yet."
+                  text="Open a task to schedule a Google Calendar meeting and invite attendees."
+                />
+              )}
             </div>
           ) : section === "Activity" ? (
             <div className="panel simple-panel">
@@ -1154,7 +2016,10 @@ export default function Home() {
                   <div
                     className="check-circle"
                     onClick={
-                      section === "My tasks"
+                      (section === "My tasks" || section === "Team tasks") &&
+                      (canManageTeam ||
+                        item.ownerUid === user.uid ||
+                        item.createdBy === user.uid)
                         ? () =>
                             changeTask(
                               teamId,
@@ -1183,7 +2048,7 @@ export default function Home() {
                           ? "Founder commitment"
                           : section === "Projects"
                             ? item.description || "Project"
-                            : `Assigned to ${item.ownerUid === user.uid ? "you" : "team"}`}
+                            : `Assigned to ${members.find((member) => member.id === item.ownerUid)?.displayName || (item.ownerUid === user.uid ? "you" : "team")}`}
                     </small>
                   </div>
                   {dueInstant(item) && (
@@ -1197,6 +2062,22 @@ export default function Home() {
                   >
                     {item.status || "Active"}
                   </span>
+                  {(section === "My tasks" || section === "Team tasks") && (
+                    <button
+                      className="text-action task-details-action"
+                      onClick={() => {
+                        setSelectedTask(item);
+                        setDescription(item.description || "");
+                        setAttendeeEmails("");
+                        setMeetingStart("");
+                        setMeetingEnd("");
+                        setReplyTo(null);
+                        setCommentDraft("");
+                      }}
+                    >
+                      Details
+                    </button>
+                  )}
                 </div>
               ))}
               {!filteredRows.length && (
@@ -1264,6 +2145,34 @@ export default function Home() {
                 onKeyDown={(e) => e.key === "Enter" && create()}
               />
             </label>
+            {(modal === "task" || modal === "project") && (
+              <label>
+                Details and context
+                <textarea
+                  maxLength={5000}
+                  rows={4}
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                  placeholder="Add useful context, success criteria, links, or questions…"
+                />
+              </label>
+            )}
+            {modal === "task" && (
+              <label>
+                Task owner
+                <select
+                  value={taskOwnerUid}
+                  onChange={(event) => setTaskOwnerUid(event.target.value)}
+                >
+                  {taskAssignees.map((member) => (
+                    <option key={member.id} value={member.id}>
+                      {member.displayName || member.email || "Team member"}
+                      {member.id === user.uid ? " · You" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label>
               Due date and time ({zone}){" "}
               <input
@@ -1309,6 +2218,238 @@ export default function Home() {
           </div>
         </div>
       )}
+      {selectedTask && (
+        <div
+          className="modal-backdrop task-detail-backdrop"
+          onClick={() => setSelectedTask(null)}
+        >
+          <section
+            className="modal task-detail-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="task-detail-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-top">
+              <div>
+                <div className="panel-kicker">TASK DETAILS</div>
+                <h2 id="task-detail-title">{selectedTask.title}</h2>
+              </div>
+              <button
+                className="icon-button"
+                aria-label="Close task details"
+                onClick={() => setSelectedTask(null)}
+              >
+                <X size={17} />
+              </button>
+            </div>
+            <div className="task-detail-scroll">
+              <label>
+                Description and context
+                <textarea
+                  rows={5}
+                  maxLength={5000}
+                  value={description}
+                  disabled={!canEditSelectedTask}
+                  onChange={(event) => setDescription(event.target.value)}
+                  placeholder="Add context, success criteria, links, or questions for your team…"
+                />
+              </label>
+              {!canEditSelectedTask && (
+                <small className="form-hint">
+                  Only Owners, Admins, the assignee, or the creator can edit
+                  task details.
+                </small>
+              )}
+              {canEditSelectedTask && (
+                <button
+                  className="secondary-button"
+                  disabled={
+                    busy || description === (selectedTask.description || "")
+                  }
+                  onClick={saveTaskDescription}
+                >
+                  Save details
+                </button>
+              )}
+              <section className="meeting-card">
+                <div className="panel-kicker">GOOGLE CALENDAR</div>
+                <h3>Schedule a team meeting</h3>
+                <p>
+                  Creates a Calendar event, sends attendee invitations, and
+                  requests a Google Meet link.
+                </p>
+                {selectedTask.meetingUrl && (
+                  <a
+                    className="meeting-link"
+                    href={selectedTask.meetingUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Join Google Meet <ArrowRight size={14} />
+                  </a>
+                )}
+                {selectedTask.calendarEventUrl && (
+                  <a
+                    className="meeting-link"
+                    href={selectedTask.calendarEventUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open in Google Calendar <ArrowRight size={14} />
+                  </a>
+                )}
+                {memberRole !== "Viewer" && (
+                  <>
+                    <div className="meeting-times">
+                      <label>
+                        Starts ({zone})
+                        <input
+                          type="datetime-local"
+                          value={meetingStart}
+                          onChange={(event) =>
+                            setMeetingStart(event.target.value)
+                          }
+                        />
+                      </label>
+                      <label>
+                        Ends ({zone})
+                        <input
+                          type="datetime-local"
+                          value={meetingEnd}
+                          onChange={(event) =>
+                            setMeetingEnd(event.target.value)
+                          }
+                        />
+                      </label>
+                    </div>
+                    <label>
+                      Attendee emails{" "}
+                      <input
+                        value={attendeeEmails}
+                        onChange={(event) =>
+                          setAttendeeEmails(event.target.value)
+                        }
+                        placeholder="name@company.com, teammate@company.com"
+                      />
+                    </label>
+                    <button
+                      className="primary-button"
+                      disabled={
+                        busy ||
+                        !meetingStart ||
+                        !meetingEnd ||
+                        toUtcInstant(meetingEnd, zone) <=
+                          toUtcInstant(meetingStart, zone)
+                      }
+                      onClick={createMeeting}
+                    >
+                      {busy ? "Scheduling…" : "Connect Google & schedule"}{" "}
+                      <ArrowRight size={14} />
+                    </button>
+                  </>
+                )}
+              </section>
+              <section className="discussion-section">
+                <div className="panel-kicker">TASK THREAD</div>
+                <h3>Questions and discussion</h3>
+                <p>
+                  Ask for clarification, share updates, and reply in context.
+                </p>
+                <div className="thread-list">
+                  {taskComments
+                    .filter((comment) => !comment.parentId)
+                    .map((comment) => (
+                      <article className="thread-comment" key={comment.id}>
+                        <div className="thread-comment-head">
+                          <b>{comment.authorName}</b>
+                          <small>
+                            {comment.createdAt?.toDate
+                              ? formatDateInTimezone(
+                                  comment.createdAt.toDate(),
+                                  zone,
+                                )
+                              : "Just now"}
+                          </small>
+                        </div>
+                        <p>{comment.body}</p>
+                        {memberRole !== "Viewer" && (
+                          <button
+                            className="text-action"
+                            onClick={() => setReplyTo(comment)}
+                          >
+                            Reply
+                          </button>
+                        )}
+                        {taskComments
+                          .filter((reply) => reply.parentId === comment.id)
+                          .map((reply) => (
+                            <div className="thread-reply" key={reply.id}>
+                              <div className="thread-comment-head">
+                                <b>{reply.authorName}</b>
+                                <small>
+                                  {reply.createdAt?.toDate
+                                    ? formatDateInTimezone(
+                                        reply.createdAt.toDate(),
+                                        zone,
+                                      )
+                                    : "Just now"}
+                                </small>
+                              </div>
+                              <p>{reply.body}</p>
+                            </div>
+                          ))}
+                      </article>
+                    ))}
+                  {!taskComments.length && (
+                    <div className="thread-empty">
+                      No discussion yet. Start the thread with a question or
+                      update.
+                    </div>
+                  )}
+                </div>
+                {memberRole !== "Viewer" ? (
+                  <div className="thread-composer">
+                    {replyTo && (
+                      <div className="replying-to">
+                        Replying to {replyTo.authorName}
+                        <button
+                          className="text-action"
+                          onClick={() => setReplyTo(null)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                    <textarea
+                      rows={3}
+                      maxLength={5000}
+                      value={commentDraft}
+                      onChange={(event) => setCommentDraft(event.target.value)}
+                      placeholder={
+                        replyTo
+                          ? "Write a reply…"
+                          : "Ask a question or share an update…"
+                      }
+                    />
+                    <button
+                      className="primary-button"
+                      disabled={busy || !commentDraft.trim()}
+                      onClick={postTaskComment}
+                    >
+                      {busy ? "Posting…" : "Post to thread"} <Send size={14} />
+                    </button>
+                  </div>
+                ) : (
+                  <small className="form-hint">
+                    Viewer access is read-only.
+                  </small>
+                )}
+              </section>
+            </div>
+          </section>
+        </div>
+      )}
       {toast && (
         <div className="toast">
           <Check size={15} />
@@ -1321,10 +2462,12 @@ export default function Home() {
 function TaskRow({
   item,
   timezone,
+  readOnly,
   onNext,
 }: {
   item: Item;
   timezone: string;
+  readOnly: boolean;
   onNext: () => void;
 }) {
   return (
@@ -1332,6 +2475,7 @@ function TaskRow({
       <button
         className="task-check"
         onClick={onNext}
+        disabled={readOnly}
         aria-label={`Advance ${item.title} status`}
       >
         {item.status === "Completed" ? <Check size={14} /> : null}
@@ -1352,7 +2496,12 @@ function TaskRow({
       >
         {item.status || "Planned"}
       </span>
-      <button className="row-menu" onClick={onNext} aria-label="Update status">
+      <button
+        className="row-menu"
+        disabled={readOnly}
+        onClick={onNext}
+        aria-label="Update status"
+      >
         <ChevronDown size={15} />
       </button>
     </div>

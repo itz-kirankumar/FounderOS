@@ -81,6 +81,24 @@ a {
   flex: 1;
   min-width: 0;
 }
+.workspace-switch-copy {
+  overflow: hidden;
+}
+.workspace-select {
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #27352b;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  outline-color: #70a77e;
+}
+.workspace-select:disabled {
+  appearance: none;
+  opacity: 1;
+}
 .workspace-switch b,
 .workspace-switch small,
 .user-profile b,
@@ -870,6 +888,109 @@ a {
 .member-row > div:nth-child(2) {
   flex: 1;
 }
+.member-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.member-controls select {
+  min-width: 92px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  padding: 0 8px;
+  color: #56645a;
+  font-size: 10px;
+}
+.member-copy {
+  min-width: 0;
+}
+.role-chip {
+  border-radius: 20px;
+  background: #f1f5f0;
+  padding: 5px 9px;
+  color: #5d7863;
+  font-size: 9px;
+}
+.danger-action {
+  color: #a15c52;
+}
+.invite-panel {
+  margin-top: 14px;
+  padding: 17px;
+  border: 1px solid #e7ece6;
+  border-radius: 9px;
+  background: #fafbf9;
+}
+.invite-panel > p,
+.meeting-card > p,
+.discussion-section > p {
+  margin: 6px 0 13px;
+  color: #818b83;
+  font-size: 10px;
+  line-height: 1.55;
+}
+.invite-form,
+.invite-link-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.invite-form input,
+.invite-link-row input {
+  height: 34px;
+  min-width: 0;
+  flex: 1;
+  border: 1px solid #e2e7e1;
+  border-radius: 6px;
+  background: white;
+  padding: 0 9px;
+  font-size: 10px;
+}
+.invite-form select {
+  height: 34px;
+  border: 1px solid #e2e7e1;
+  border-radius: 6px;
+  background: white;
+  padding: 0 8px;
+  font-size: 10px;
+}
+.invite-form .primary-button,
+.invite-link-row .secondary-button {
+  flex: none;
+}
+.invite-link-row {
+  margin-top: 9px;
+}
+.form-hint {
+  display: block;
+  margin-top: 8px;
+  color: #8a938b;
+  font-size: 9px;
+}
+.invite-list {
+  margin-top: 12px;
+}
+.invite-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid #e9ede8;
+  padding: 11px 0 0;
+  margin-top: 10px;
+}
+.invite-item b,
+.invite-item small {
+  display: block;
+  font-size: 10px;
+}
+.invite-item small {
+  margin-top: 4px;
+  color: #89938b;
+  font-size: 9px;
+}
 .member-row b,
 .settings-line b {
   display: block;
@@ -1051,18 +1172,161 @@ a {
   margin: 13px 0;
 }
 .modal input,
-.modal select {
+.modal select,
+.modal textarea {
   display: block;
   width: 100%;
-  height: 37px;
   border: 1px solid #e2e7e1;
   border-radius: 6px;
   background: white;
-  padding: 0 10px;
   margin-top: 6px;
   outline-color: #70a77e;
   font-size: 11px;
   color: #28352b;
+}
+.modal input,
+.modal select {
+  height: 37px;
+  padding: 0 10px;
+}
+.modal textarea {
+  min-height: 84px;
+  padding: 10px;
+  resize: vertical;
+  line-height: 1.5;
+}
+.task-details-action {
+  margin-left: 5px;
+}
+.task-detail-backdrop {
+  z-index: 21;
+}
+.task-detail-modal {
+  width: min(690px, 100%);
+  max-height: min(90vh, 900px);
+  display: flex;
+  flex-direction: column;
+}
+.task-detail-modal .modal-top {
+  flex: none;
+}
+.task-detail-scroll {
+  overflow-y: auto;
+  padding-right: 3px;
+}
+.task-detail-modal h3 {
+  margin: 5px 0 0;
+  font: 700 13px var(--display);
+  color: #344339;
+}
+.task-detail-modal .secondary-button {
+  margin-bottom: 14px;
+}
+.meeting-card,
+.discussion-section {
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 17px;
+}
+.meeting-times {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.meeting-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  color: #4f8060;
+  font-size: 10px;
+  text-decoration: none;
+}
+.meeting-link:hover {
+  text-decoration: underline;
+}
+.meeting-calendar-list {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 16px;
+}
+.meetings-intro {
+  color: #818b83;
+  font-size: 10px;
+  margin: 8px 0 16px;
+}
+.task-check:disabled,
+.row-menu:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.thread-list {
+  display: grid;
+  gap: 12px;
+}
+.thread-comment {
+  padding: 12px;
+  border: 1px solid #ebefea;
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+.thread-comment-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.thread-comment-head b {
+  font-size: 10px;
+}
+.thread-comment-head small {
+  color: #909991;
+  font-size: 9px;
+}
+.thread-comment p,
+.thread-reply p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+  color: #4f5b51;
+  font-size: 10px;
+  line-height: 1.55;
+}
+.thread-reply {
+  margin: 10px 0 0 14px;
+  padding: 10px 0 0 12px;
+  border-top: 1px solid #e8ede7;
+  border-left: 2px solid #dfe9df;
+}
+.thread-empty {
+  padding: 15px;
+  border-radius: 7px;
+  background: #f6f8f5;
+  color: #89938b;
+  font-size: 10px;
+}
+.thread-composer {
+  margin-top: 13px;
+}
+.thread-composer .primary-button {
+  margin-top: 8px;
+}
+.replying-to {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  color: #78847a;
+  font-size: 9px;
+}
+.login-shell.invite-gate {
+  display: flex;
+  justify-content: center;
+}
+.invite-gate .login-panel {
+  width: min(560px, 100%);
+}
+.invite-gate .login-box > .secondary-button {
+  margin: 10px 0 0 8px;
 }
 .modal-actions {
   display: flex;
@@ -1660,6 +1924,49 @@ a {
   }
   .full-row-copy > b {
     font-size: 10px;
+  }
+  .invite-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .invite-form input,
+  .invite-form select,
+  .invite-form .primary-button {
+    width: 100%;
+  }
+  .invite-link-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .invite-link-row .secondary-button {
+    justify-content: center;
+  }
+  .member-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .member-copy {
+    flex: 1 1 calc(100% - 50px);
+  }
+  .member-controls {
+    width: 100%;
+    padding-left: 43px;
+  }
+  .task-details-action {
+    font-size: 9px;
+  }
+  .task-detail-modal {
+    max-height: 94vh;
+    padding: 16px;
+  }
+  .meeting-times {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .thread-comment-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
   }
   .status-chip {
     font-size: 8px;
