@@ -258,6 +258,7 @@ export default function Home() {
   const [commentDraft, setCommentDraft] = useState("");
   const [replyTo, setReplyTo] = useState<Item | null>(null);
   const [description, setDescription] = useState("");
+  const [attendeeEmails, setAttendeeEmails] = useState("");
   const [meetingStart, setMeetingStart] = useState("");
   const [meetingEnd, setMeetingEnd] = useState("");
   const [scheduleMeetingOnCreate, setScheduleMeetingOnCreate] = useState(false);
@@ -743,6 +744,7 @@ export default function Home() {
     setPriority("Medium");
     setDescription("");
     setTaskOwnerUid(user?.uid || "");
+    setAttendeeEmails("");
     setMeetingStart("");
     setMeetingEnd("");
     setScheduleMeetingOnCreate(false);
@@ -960,6 +962,21 @@ export default function Home() {
     setBusy(true);
     try {
       const accessToken = await requestGoogleCalendarAccess();
+      const invitedEmails = attendeeEmails
+        .split(/[\s,;]+/)
+        .map((email) => email.trim())
+        .filter(Boolean);
+      const assigneeEmail =
+        members.find((member) => member.id === task.ownerUid)?.email || "";
+      if (
+        assigneeEmail &&
+        task.ownerUid !== user.uid &&
+        !invitedEmails.some(
+          (email) => email.toLowerCase() === assigneeEmail.toLowerCase(),
+        )
+      ) {
+        invitedEmails.push(assigneeEmail);
+      }
       const meeting = await scheduleGoogleMeeting(
         {
           title: `FounderOS · ${task.title}`,
@@ -967,7 +984,7 @@ export default function Home() {
           start,
           end,
           timezone: task.timezone || zone,
-          attendeeEmails: [],
+          attendeeEmails: invitedEmails,
         },
         accessToken,
       );
@@ -1017,15 +1034,46 @@ export default function Home() {
       return;
     setBusy(true);
     try {
+      const accessToken = await requestGoogleCalendarAccess();
+      const invitedEmails = attendeeEmails
+        .split(/[\s,;]+/)
+        .map((email) => email.trim())
+        .filter(Boolean);
+      const assigneeEmail =
+        members.find((member) => member.id === selectedTask.ownerUid)?.email ||
+        "";
+      if (
+        assigneeEmail &&
+        selectedTask.ownerUid !== user.uid &&
+        !invitedEmails.some(
+          (email) => email.toLowerCase() === assigneeEmail.toLowerCase(),
+        )
+      ) {
+        invitedEmails.push(assigneeEmail);
+      }
+      const meeting = await scheduleGoogleMeeting(
+        {
+          title: `FounderOS · ${selectedTask.title}`,
+          description: selectedTask.description || selectedTask.title,
+          start: toUtcInstant(meetingStart, zone),
+          end: toUtcInstant(meetingEnd, zone),
+          timezone: zone,
+          attendeeEmails: invitedEmails,
+        },
+        accessToken,
+      );
       const batch = writeBatch(db);
       batch.update(doc(db, "teams", teamId, "tasks", selectedTask.id), {
+        googleCalendarEventId: meeting.eventId,
+        meetingUrl: meeting.meetUrl,
+        calendarEventUrl: meeting.htmlLink || "",
         meetingStart: toUtcInstant(meetingStart, zone),
         meetingEnd: toUtcInstant(meetingEnd, zone),
         updatedAt: serverTimestamp(),
       });
       batch.set(doc(collection(db, "teams", teamId, "activity")), {
         type: "meeting_scheduled",
-        title: "Scheduled a team meeting",
+        title: "Scheduled a Google Calendar meeting",
         detail: selectedTask.title,
         actor: user.uid,
         entityId: selectedTask.id,
@@ -1034,11 +1082,18 @@ export default function Home() {
       await batch.commit();
       const scheduledTask = {
         ...selectedTask,
+        googleCalendarEventId: meeting.eventId,
+        meetingUrl: meeting.meetUrl,
+        calendarEventUrl: meeting.htmlLink || "",
         meetingStart: toUtcInstant(meetingStart, zone),
         meetingEnd: toUtcInstant(meetingEnd, zone),
       };
       setSelectedTask(scheduledTask);
-      setToast("Team meeting scheduled. Create a Google Meet link when ready.");
+      setToast(
+        meeting.meetUrl
+          ? "Google Calendar meeting scheduled"
+          : "Calendar event scheduled; Meet link is still being prepared",
+      );
     } catch (error) {
       setToast(
         error instanceof Error
@@ -1063,7 +1118,12 @@ export default function Home() {
       return;
     setBusy(true);
     try {
-      await addItem(
+      const accessToken =
+        modal === "task" && scheduleMeetingOnCreate
+          ? await requestGoogleCalendarAccess()
+          : undefined;
+      const ownerUid = taskOwnerUid || user.uid;
+      const createdId = await addItem(
         teamId,
         modal === "commitment"
           ? "commitments"
@@ -1111,6 +1171,7 @@ export default function Home() {
                   ? {
                       meetingStart: toUtcInstant(meetingStart, zone),
                       meetingEnd: toUtcInstant(meetingEnd, zone),
+                      timezone: zone,
                     }
                   : {}),
               },
@@ -1118,12 +1179,68 @@ export default function Home() {
       );
       setModal("");
       if (modal === "task" && scheduleMeetingOnCreate) {
-        setToast("Task and team meeting scheduled");
+        try {
+          const assigneeEmail =
+            members.find((member) => member.id === ownerUid)?.email || "";
+          const invitedEmails = attendeeEmails
+            .split(/[\s,;]+/)
+            .map((email) => email.trim())
+            .filter(Boolean);
+          if (
+            assigneeEmail &&
+            ownerUid !== user.uid &&
+            !invitedEmails.some(
+              (email) => email.toLowerCase() === assigneeEmail.toLowerCase(),
+            )
+          ) {
+            invitedEmails.push(assigneeEmail);
+          }
+          const meeting = await scheduleGoogleMeeting(
+            {
+              title: `FounderOS · ${title.trim()}`,
+              description: description.trim() || title.trim(),
+              start: toUtcInstant(meetingStart, zone),
+              end: toUtcInstant(meetingEnd, zone),
+              timezone: zone,
+              attendeeEmails: invitedEmails,
+            },
+            accessToken,
+          );
+          const batch = writeBatch(db);
+          batch.update(doc(db, "teams", teamId, "tasks", createdId), {
+            googleCalendarEventId: meeting.eventId,
+            meetingUrl: meeting.meetUrl,
+            calendarEventUrl: meeting.htmlLink || "",
+            updatedAt: serverTimestamp(),
+          });
+          batch.set(doc(collection(db, "teams", teamId, "activity")), {
+            type: "meeting_scheduled",
+            title: "Scheduled a Google Calendar meeting",
+            detail: title.trim(),
+            actor: user.uid,
+            entityId: createdId,
+            createdAt: serverTimestamp(),
+          });
+          await batch.commit();
+          setToast(
+            meeting.meetUrl
+              ? "Task saved, Calendar invites sent, and Meet link created"
+              : "Task saved and Calendar invites sent; Google is preparing the Meet link. Open the Calendar event for details.",
+          );
+        } catch (error) {
+          setToast(
+            error instanceof Error
+              ? `Task saved with its meeting time, but Google Calendar could not finish: ${error.message}`
+              : "Task saved with its meeting time, but Google Calendar could not finish. Open the task to retry.",
+          );
+        }
       } else {
         setToast("Saved to your workspace");
       }
-    } catch {
-      setToast("Could not save. Try again.");
+    } catch (error) {
+      setToast(
+        error instanceof Error ? error.message : "Could not save. Try again.",
+      );
     } finally {
       setBusy(false);
     }
@@ -1420,6 +1537,24 @@ export default function Home() {
         firstDue.getTime() - secondDue.getTime()
       );
     });
+  const overviewTasks = [...tasks].sort((first, second) => {
+    const priorityWeight: Record<string, number> = {
+      Critical: 0,
+      High: 1,
+      Medium: 2,
+      Low: 3,
+    };
+    const priorityOrder =
+      (priorityWeight[first.priority] ?? 4) -
+      (priorityWeight[second.priority] ?? 4);
+    if (priorityOrder !== 0) return priorityOrder;
+    const firstOpen = first.status === "Completed" ? 1 : 0;
+    const secondOpen = second.status === "Completed" ? 1 : 0;
+    if (firstOpen !== secondOpen) return firstOpen - secondOpen;
+    const firstDue = dueInstant(first)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+    const secondDue = dueInstant(second)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+    return firstDue - secondDue;
+  });
   const doneCount = tasks.filter((t) => t.status === "Completed").length;
   const completion = tasks.length
     ? Math.round((100 * doneCount) / tasks.length)
@@ -2274,21 +2409,23 @@ export default function Home() {
                 <section className="panel task-panel">
                   <div className="panel-heading">
                     <div>
-                      <div className="panel-kicker">MAKE TODAY COUNT</div>
+                      <div className="panel-kicker">YOUR COMPANY WORK</div>
                       <h2>
-                        Priority tasks{" "}
-                        <span className="pill-count">{todayTasks.length}</span>
+                        All tasks{" "}
+                        <span className="pill-count">
+                          {overviewTasks.length}
+                        </span>
                       </h2>
                     </div>
                     <button
                       className="text-action"
-                      onClick={() => setSection("My tasks")}
+                      onClick={() => setSection("Team tasks")}
                     >
                       View all <ArrowRight size={14} />
                     </button>
                   </div>
                   <div className="task-list">
-                    {todayTasks.slice(0, 5).map((t) => (
+                    {overviewTasks.map((t) => (
                       <TaskRow
                         key={t.id}
                         item={t}
@@ -2324,10 +2461,10 @@ export default function Home() {
                         }}
                       />
                     ))}
-                    {!todayTasks.length && (
+                    {!overviewTasks.length && (
                       <Empty
-                        title="Clear runway."
-                        text="No tasks need attention today. Add a task when you’re ready."
+                        title="No tasks yet."
+                        text="Add your first task to see company work here."
                         action={() => open("task")}
                       />
                     )}
@@ -3635,6 +3772,11 @@ export default function Home() {
                       onClick={() => {
                         setSelectedTask(meeting);
                         setDescription(meeting.description || "");
+                        setMeetingStart("");
+                        setMeetingEnd("");
+                        setAttendeeEmails("");
+                        setReplyTo(null);
+                        setCommentDraft("");
                       }}
                     >
                       Details
@@ -3810,6 +3952,7 @@ export default function Home() {
                         setDescription(item.description || "");
                         setMeetingStart("");
                         setMeetingEnd("");
+                        setAttendeeEmails("");
                         setReplyTo(null);
                         setCommentDraft("");
                       }}
@@ -3963,6 +4106,22 @@ export default function Home() {
                 </label>
                 {scheduleMeetingOnCreate && (
                   <div className="meeting-create-fields">
+                    <label>
+                      Invite by email
+                      <input
+                        type="text"
+                        value={attendeeEmails}
+                        onChange={(event) =>
+                          setAttendeeEmails(event.target.value)
+                        }
+                        placeholder="teammate@company.com, guest@example.com"
+                        autoComplete="off"
+                      />
+                    </label>
+                    <small className="form-hint">
+                      Google Calendar sends the invitations. The task owner is
+                      invited automatically when they are someone else.
+                    </small>
                     <div className="meeting-times">
                       <label>
                         Starts ({zone})
@@ -4172,6 +4331,21 @@ export default function Home() {
                   )}
                 {memberRole !== "Viewer" && (
                   <>
+                    <label>
+                      Invite by email
+                      <input
+                        type="text"
+                        value={attendeeEmails}
+                        onChange={(event) =>
+                          setAttendeeEmails(event.target.value)
+                        }
+                        placeholder="teammate@company.com, guest@example.com"
+                        autoComplete="off"
+                      />
+                    </label>
+                    <small className="form-hint">
+                      Google Calendar sends the invitations to these guests.
+                    </small>
                     <div className="meeting-times">
                       <label>
                         Starts ({zone})
