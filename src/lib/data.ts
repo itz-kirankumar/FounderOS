@@ -45,6 +45,20 @@ export async function addItem(
     entityId: created.id,
     createdAt: serverTimestamp(),
   });
+  if (name === "tasks" && data.ownerUid && data.ownerUid !== actor) {
+    batch.set(doc(collection(db, "users", data.ownerUid, "notifications")), {
+      teamId,
+      recipientUid: data.ownerUid,
+      type: "task_assigned",
+      title: "A task was assigned to you",
+      body: data.title || "A new task is waiting for you.",
+      actorUid: actor,
+      targetType: "task",
+      targetId: created.id,
+      read: false,
+      createdAt: serverTimestamp(),
+    });
+  }
   await batch.commit();
   return created.id;
 }
@@ -55,9 +69,19 @@ export async function changeTask(
   actor: string,
 ) {
   const { previousStatus, ...changes } = patch;
+  const taskRef = doc(db, "teams", teamId, "tasks", id);
+  const existingTask = await getDoc(taskRef);
+  const old = existingTask.data();
+  if (!old) throw new Error("This task no longer exists.");
   const batch = writeBatch(db);
-  batch.update(doc(db, "teams", teamId, "tasks", id), {
+  batch.update(taskRef, {
     ...changes,
+    ...(changes.status
+      ? {
+          completedAt:
+            changes.status === "Completed" ? serverTimestamp() : null,
+        }
+      : {}),
     updatedAt: serverTimestamp(),
   });
   batch.set(doc(collection(db, "teams", teamId, "activity")), {
@@ -71,6 +95,15 @@ export async function changeTask(
     entityId: id,
     createdAt: serverTimestamp(),
   });
+  if (changes.status && changes.status !== old.status) {
+    batch.set(doc(collection(taskRef, "history")), {
+      actorUid: actor,
+      type: "status_changed",
+      from: old.status || "Planned",
+      to: changes.status,
+      createdAt: serverTimestamp(),
+    });
+  }
   await batch.commit();
 }
 
@@ -190,8 +223,15 @@ export async function addTaskComment(
   body: string,
   parentId?: string,
 ) {
+  const taskRef = doc(db, "teams", teamId, "tasks", taskId);
+  const taskSnapshot = await getDoc(taskRef);
+  if (!taskSnapshot.exists()) throw new Error("This task no longer exists.");
+  const task = taskSnapshot.data();
   const batch = writeBatch(db);
-  batch.set(doc(collection(db, "teams", teamId, "tasks", taskId, "comments")), {
+  const commentRef = doc(
+    collection(db, "teams", teamId, "tasks", taskId, "comments"),
+  );
+  batch.set(commentRef, {
     authorUid: author.uid,
     authorName: author.name,
     authorEmail: author.email,
@@ -207,6 +247,24 @@ export async function addTaskComment(
     entityId: taskId,
     createdAt: serverTimestamp(),
   });
+  const recipientUids = Array.from(
+    new Set([task.ownerUid, task.createdBy]),
+  ).filter((uid) => typeof uid === "string" && uid !== author.uid);
+  for (const recipientUid of recipientUids) {
+    batch.set(doc(collection(db, "users", recipientUid, "notifications")), {
+      teamId,
+      recipientUid,
+      type: "task_comment",
+      title: "New reply in a task discussion",
+      body: `${author.name || "A teammate"}: ${body.trim().slice(0, 300)}`,
+      actorUid: author.uid,
+      targetType: "task",
+      targetId: taskId,
+      commentId: commentRef.id,
+      read: false,
+      createdAt: serverTimestamp(),
+    });
+  }
   await batch.commit();
 }
 export async function ensureWorkspace(

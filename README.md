@@ -1,6 +1,6 @@
 # FounderOS
 
-FounderOS is a private workspace for founder tasks, commitments, projects, and an append-only activity record. The web app uses Next.js and the Firebase browser SDK; Firestore Security Rules are the authorization boundary for all persisted workspace data.
+FounderOS is a private company workspace for founder tasks, commitments, projects, milestones, threaded discussions, weekly reviews, team availability, and an append-only activity record. The web app uses Next.js and the Firebase browser SDK; Firestore Security Rules are the authorization boundary for persisted workspace data.
 
 ## Local development
 
@@ -52,17 +52,20 @@ Use a Node.js 22 deployment runtime. The app sends security headers, disables se
 - `users/{uid}` contains the user's profile and workspace pointer.
 - `teams/{teamId}` stores workspace ownership and timezone.
 - `teams/{teamId}/members/{uid}` stores membership and role.
-- `teams/{teamId}/tasks`, `commitments`, and `projects` store operating records.
+- `teams/{teamId}/tasks`, `commitments`, `projects`, and `milestones` store operating records.
+- `teams/{teamId}/weeklyReviews` stores member-owned weekly reviews and immutable prior versions.
 - `teams/{teamId}/activity` is readable by members and append-only through the client rules.
 - `teams/{teamId}/invites/{token}` stores expiring, single-use team invitations.
 - `teams/{teamId}/tasks/{taskId}/comments/{commentId}` stores threaded task discussions.
+- `teams/{teamId}/tasks/{taskId}/history/{eventId}` stores immutable status changes.
+- `users/{uid}/notifications` stores private in-app assignment and task-reply notices.
 
 Every workspace read requires membership. Team invites are random 256-bit links, bound to a verified email address, single-use, and expire after seven days. Owners can assign Admin, Member, or Viewer; Admins can assign Member or Viewer. Owners/Admins manage membership and invites within those limits. Members can contribute and discuss; Viewers are read-only. Firestore rules enforce these permissions, invite acceptance, and immutable discussion history. FounderOS generates a copyable invite link; the team owner shares it with the invitee. Automatic email delivery requires an email provider and is not configured yet.
 
-Task descriptions can be added at creation or edited later. Each task has a live discussion thread with replies. Scheduling a meeting requests Calendar permission, creates an event in the acting user's primary Google Calendar, emails attendees through Google Calendar, and requests a Google Meet conference link.
+Task descriptions can be added at creation or edited later. Each task has a live discussion thread with replies. Team members set their local workdays, hours, and availability; the common-time finder translates those windows across IANA timezones and avoids scheduled team meetings. Weekly reviews preserve previous versions. Scheduling a meeting requests Calendar permission, creates an event in the acting user's primary Google Calendar, emails attendees through Google Calendar, and requests a Google Meet conference link. In-app notifications cover new assignments and task discussion replies; email/WhatsApp reminders and scheduled digests need a delivery provider and are not configured.
 
 Before enabling meeting scheduling in production, enable the Google Calendar API in the Google Cloud project used by Firebase Authentication, configure the OAuth consent screen and authorized domains, and publish/verify the `https://www.googleapis.com/auth/calendar.events` scope as required for the audience. Each organizer must grant Calendar access. Cloud Firestore backups, alerting, and production OAuth domains must also be configured before launch.
 
 ## Current product scope
 
-The current release includes Google sign-in, multiple team workspaces per user, role-based team management, email-bound invitation links, task descriptions and threaded discussions, Google Calendar meeting scheduling, commitments, projects, activity history, and a dashboard. Reminder delivery, weekly reviews, and analytics are not yet implemented.
+The application code is prepared for a production build, but it is not live-cloud provisioned by this repository. Local development uses the Firebase Emulator demo project and placeholder web configuration. Before launch, provision a real Firebase project, authorized domains, OAuth client and Calendar consent, deploy Firestore/Storage rules and indexes, configure deployment environment variables and backups/monitoring, and verify the production Google sign-in and Calendar flows. Do not deploy `.env.local` or the emulator demo configuration. External email/WhatsApp reminder delivery and scheduled digests remain unimplemented; analytics dashboards are also outside the current release.

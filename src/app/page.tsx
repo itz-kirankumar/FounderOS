@@ -18,6 +18,7 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
   updateDoc,
   writeBatch,
 } from "firebase/firestore";
@@ -30,14 +31,19 @@ import {
 import {
   Activity,
   ArrowRight,
+  BarChart3,
+  Bell,
   CalendarDays,
+  CalendarClock,
   Check,
   CheckCheck,
   ChevronDown,
   CircleHelp,
   Clock3,
+  ClipboardCheck,
   Command,
   FolderKanban,
+  FlagTriangleRight,
   Gauge,
   LayoutDashboard,
   ListTodo,
@@ -74,6 +80,7 @@ import {
   detectBrowserTimezone,
   formatDateInTimezone,
   formatInstantInTimezone,
+  findCommonTimeSlots,
   previousSevenDayKeys,
   toUtcInstant,
 } from "@/lib/timezone";
@@ -89,6 +96,11 @@ const nav = [
       { name: "Projects", icon: FolderKanban },
       { name: "Calendar", icon: CalendarDays },
       { name: "Meetings", icon: CalendarDays },
+      { name: "Availability", icon: CalendarClock },
+      { name: "Milestones", icon: FlagTriangleRight },
+      { name: "Timeline", icon: Activity },
+      { name: "Accountability", icon: BarChart3 },
+      { name: "Weekly review", icon: ClipboardCheck },
       { name: "Activity", icon: Activity },
     ],
   },
@@ -96,6 +108,7 @@ const nav = [
     label: "Manage",
     items: [
       { name: "Team", icon: Users },
+      { name: "Notifications", icon: Bell },
       { name: "Settings", icon: Settings },
     ],
   },
@@ -146,6 +159,56 @@ function formatMemberTime(date: Date, timezone: string) {
       minute: "2-digit",
       timeZoneName: "short",
     }).format(date);
+  } catch {
+    return "Timezone unavailable";
+  }
+}
+function getMemberAvailability(member: Item, tasks: Item[], now: Date) {
+  if (member.availabilityStatus && member.availabilityStatus !== "Auto") {
+    return member.availabilityStatus;
+  }
+  const activeMeeting = tasks.some((task) => {
+    if (task.ownerUid !== member.id || !task.meetingStart || !task.meetingEnd)
+      return false;
+    const start = task.meetingStart.toDate?.() || new Date(task.meetingStart);
+    const end = task.meetingEnd.toDate?.() || new Date(task.meetingEnd);
+    return now >= start && now < end;
+  });
+  if (activeMeeting) return "In meeting";
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: member.timezone || "UTC",
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(now);
+    const part = (type: string) =>
+      parts.find((entry) => entry.type === type)?.value || "";
+    const days: Record<string, number> = {
+      Sun: 0,
+      Mon: 1,
+      Tue: 2,
+      Wed: 3,
+      Thu: 4,
+      Fri: 5,
+      Sat: 6,
+    };
+    const [startHour, startMinute] = (member.workdayStart || "09:00")
+      .split(":")
+      .map(Number);
+    const [endHour, endMinute] = (member.workdayEnd || "17:00")
+      .split(":")
+      .map(Number);
+    const minute = Number(part("hour")) * 60 + Number(part("minute"));
+    const workingDays: number[] = member.workingDays?.length
+      ? member.workingDays
+      : [1, 2, 3, 4, 5];
+    return workingDays.includes(days[part("weekday")]) &&
+      minute >= startHour * 60 + startMinute &&
+      minute < endHour * 60 + endMinute
+      ? "Available"
+      : "Outside hours";
   } catch {
     return "Timezone unavailable";
   }
@@ -202,6 +265,23 @@ export default function Home() {
     [commitments, setCommitments] = useState<Item[]>([]),
     [projects, setProjects] = useState<Item[]>([]),
     [activity, setActivity] = useState<Item[]>([]);
+  const [milestones, setMilestones] = useState<Item[]>([]);
+  const [weeklyReviews, setWeeklyReviews] = useState<Item[]>([]);
+  const [notifications, setNotifications] = useState<Item[]>([]);
+  const [availabilityDraft, setAvailabilityDraft] = useState({
+    status: "Auto",
+    workingDays: [1, 2, 3, 4, 5],
+    start: "09:00",
+    end: "17:00",
+  });
+  const [reviewDraft, setReviewDraft] = useState({
+    weekStart: "",
+    wins: "",
+    misses: "",
+    blockers: "",
+    priorities: "",
+    reflection: "",
+  });
   const [modal, setModal] = useState(""),
     [title, setTitle] = useState(""),
     [due, setDue] = useState(""),
@@ -347,6 +427,37 @@ export default function Home() {
             s.docs.slice(0, 25).map((d) => ({ id: d.id, ...d.data() }) as Item),
           ),
       ),
+      onSnapshot(
+        query(
+          collection(db, "teams", teamId, "milestones"),
+          orderBy("dueAt", "asc"),
+          limit(100),
+        ),
+        (s) =>
+          setMilestones(s.docs.map((d) => ({ id: d.id, ...d.data() }) as Item)),
+      ),
+      onSnapshot(
+        query(
+          collection(db, "teams", teamId, "weeklyReviews"),
+          orderBy("weekStart", "desc"),
+          limit(50),
+        ),
+        (s) =>
+          setWeeklyReviews(
+            s.docs.map((d) => ({ id: d.id, ...d.data() }) as Item),
+          ),
+      ),
+      onSnapshot(
+        query(
+          collection(db, "users", user!.uid, "notifications"),
+          orderBy("createdAt", "desc"),
+          limit(50),
+        ),
+        (s) =>
+          setNotifications(
+            s.docs.map((d) => ({ id: d.id, ...d.data() }) as Item),
+          ),
+      ),
       onSnapshot(doc(db, "users", user!.uid), (s) => {
         const nextProfile = s.data() || {};
         setProfile(nextProfile);
@@ -445,6 +556,25 @@ export default function Home() {
       members.find((member) => member.id === user.uid)?.title || "",
     );
   }, [members, user]);
+  useEffect(() => {
+    const own = members.find((member) => member.id === user?.uid);
+    if (!own) return;
+    setAvailabilityDraft({
+      status: own.availabilityStatus || "Auto",
+      workingDays: own.workingDays || [1, 2, 3, 4, 5],
+      start: own.workdayStart || "09:00",
+      end: own.workdayEnd || "17:00",
+    });
+  }, [members, user]);
+  useEffect(() => {
+    if (reviewDraft.weekStart) return;
+    const today = new Date(`${dateKeyInTimezone(new Date(), zone)}T12:00:00Z`);
+    today.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7));
+    setReviewDraft((draft) => ({
+      ...draft,
+      weekStart: today.toISOString().slice(0, 10),
+    }));
+  }, [reviewDraft.weekStart, zone]);
   useEffect(() => {
     const interval = window.setInterval(() => setClockNow(new Date()), 60_000);
     return () => window.clearInterval(interval);
@@ -853,7 +983,9 @@ export default function Home() {
           ? "commitments"
           : modal === "project"
             ? "projects"
-            : "tasks",
+            : modal === "milestone"
+              ? "milestones"
+              : "tasks",
         modal === "commitment"
           ? {
               description: title.trim(),
@@ -863,21 +995,33 @@ export default function Home() {
               dueAt: toUtcInstant(due, zone),
               timezone: zone,
             }
-          : {
-              title: title.trim(),
-              ...(description.trim()
-                ? { description: description.trim() }
-                : {}),
-              status: modal === "project" ? "Active" : "Planned",
-              ...(modal === "project"
-                ? {}
-                : {
-                    priority,
-                    ownerUid: taskOwnerUid || user.uid,
-                    dueAt: toUtcInstant(due, zone),
-                    timezone: zone,
-                  }),
-            },
+          : modal === "milestone"
+            ? {
+                title: title.trim(),
+                ...(description.trim()
+                  ? { description: description.trim() }
+                  : {}),
+                status: "Planned",
+                priority,
+                ownerUid: taskOwnerUid || user.uid,
+                dueAt: toUtcInstant(due, zone),
+                timezone: zone,
+              }
+            : {
+                title: title.trim(),
+                ...(description.trim()
+                  ? { description: description.trim() }
+                  : {}),
+                status: modal === "project" ? "Active" : "Planned",
+                ...(modal === "project"
+                  ? {}
+                  : {
+                      priority,
+                      ownerUid: taskOwnerUid || user.uid,
+                      dueAt: toUtcInstant(due, zone),
+                      timezone: zone,
+                    }),
+              },
         user.uid,
       );
       setModal("");
@@ -915,6 +1059,119 @@ export default function Home() {
       setTimeout(() => setToast(""), 2400);
     } catch {
       setToast("Could not save your timezone. Try again.");
+    }
+  };
+  const saveAvailability = async () => {
+    if (!user || !teamId || !availabilityDraft.workingDays.length) return;
+    try {
+      await updateDoc(doc(db, "teams", teamId, "members", user.uid), {
+        availabilityStatus: availabilityDraft.status,
+        workingDays: availabilityDraft.workingDays,
+        workdayStart: availabilityDraft.start,
+        workdayEnd: availabilityDraft.end,
+      });
+      setToast("Availability and working hours saved");
+    } catch {
+      setToast("Could not save your availability. Check your connection.");
+    }
+  };
+  const saveWeeklyReview = async () => {
+    if (!user || !teamId || !reviewDraft.weekStart || busy) return;
+    setBusy(true);
+    const reviewRef = doc(
+      db,
+      "teams",
+      teamId,
+      "weeklyReviews",
+      `${user.uid}_${reviewDraft.weekStart}`,
+    );
+    try {
+      const current = await getDoc(reviewRef);
+      const batch = writeBatch(db);
+      const values = {
+        wins: reviewDraft.wins.trim(),
+        misses: reviewDraft.misses.trim(),
+        blockers: reviewDraft.blockers.trim(),
+        priorities: reviewDraft.priorities.trim(),
+        reflection: reviewDraft.reflection.trim(),
+      };
+      if (current.exists()) {
+        batch.set(doc(collection(reviewRef, "versions")), {
+          ownerUid: user.uid,
+          savedAt: serverTimestamp(),
+          values: current.data(),
+        });
+        batch.update(reviewRef, { ...values, updatedAt: serverTimestamp() });
+      } else {
+        batch.set(reviewRef, {
+          ownerUid: user.uid,
+          weekStart: reviewDraft.weekStart,
+          ...values,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+      batch.set(doc(collection(db, "teams", teamId, "activity")), {
+        type: current.exists()
+          ? "weekly_review_updated"
+          : "weekly_review_created",
+        title: current.exists()
+          ? "Updated a weekly review"
+          : "Completed a weekly review",
+        detail: `Week of ${reviewDraft.weekStart}`,
+        actor: user.uid,
+        entityId: reviewRef.id,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      setToast("Weekly review saved for your team");
+    } catch {
+      setToast("Could not save your weekly review. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const markNotificationRead = async (notification: Item) => {
+    if (!user || notification.read) return;
+    try {
+      await updateDoc(
+        doc(db, "users", user.uid, "notifications", notification.id),
+        {
+          read: true,
+          readAt: serverTimestamp(),
+        },
+      );
+    } catch {
+      setToast("Could not update this notification.");
+    }
+  };
+  const changeMilestone = async (milestone: Item) => {
+    if (!teamId || !user || memberRole === "Viewer") return;
+    const status = milestone.status === "Completed" ? "Planned" : "Completed";
+    const batch = writeBatch(db);
+    batch.update(doc(db, "teams", teamId, "milestones", milestone.id), {
+      status,
+      completedAt: status === "Completed" ? serverTimestamp() : null,
+      updatedAt: serverTimestamp(),
+    });
+    batch.set(doc(collection(db, "teams", teamId, "activity")), {
+      type: "milestone_updated",
+      title:
+        status === "Completed"
+          ? "Completed a milestone"
+          : "Reopened a milestone",
+      detail: milestone.title,
+      actor: user.uid,
+      entityId: milestone.id,
+      createdAt: serverTimestamp(),
+    });
+    try {
+      await batch.commit();
+      setToast(
+        status === "Completed" ? "Milestone completed" : "Milestone reopened",
+      );
+    } catch {
+      setToast("Could not update this milestone.");
     }
   };
   const saveCompany = async () => {
@@ -1446,7 +1703,9 @@ export default function Home() {
           ? commitments
           : section === "Projects"
             ? projects
-            : tasks;
+            : section === "Milestones"
+              ? milestones
+              : tasks;
   const taskAssignees = canManageTeam
     ? members
     : members.filter((member) => member.id === user.uid);
@@ -1477,6 +1736,56 @@ export default function Home() {
         : new Date(second.meetingStart);
       return firstDate.getTime() - secondDate.getTime();
     });
+  const busyIntervals = scheduledMeetings.map((meeting) => ({
+    start: meeting.meetingStart?.toDate
+      ? meeting.meetingStart.toDate()
+      : new Date(meeting.meetingStart),
+    end: meeting.meetingEnd?.toDate
+      ? meeting.meetingEnd.toDate()
+      : new Date(meeting.meetingEnd),
+  }));
+  const commonTimeSlots = findCommonTimeSlots(
+    members,
+    busyIntervals,
+    clockNow,
+    30,
+    4,
+  );
+  const timelineItems: Item[] = [
+    ...tasks
+      .filter((item) => dueInstant(item))
+      .map((item) => ({
+        ...item,
+        timelineType: "Task",
+        timelineAt: dueInstant(item)!,
+      })),
+    ...commitments
+      .filter((item) => dueInstant(item))
+      .map((item) => ({
+        ...item,
+        timelineType: "Commitment",
+        timelineAt: dueInstant(item)!,
+      })),
+    ...milestones
+      .filter((item) => dueInstant(item))
+      .map((item) => ({
+        ...item,
+        timelineType: "Milestone",
+        timelineAt: dueInstant(item)!,
+      })),
+    ...scheduledMeetings.map((item) => ({
+      ...item,
+      timelineType: "Meeting",
+      timelineAt: item.meetingStart?.toDate
+        ? item.meetingStart.toDate()
+        : new Date(item.meetingStart),
+    })),
+  ].sort(
+    (first, second) => first.timelineAt.getTime() - second.timelineAt.getTime(),
+  );
+  const unreadNotifications = notifications.filter(
+    (notification) => !notification.read,
+  ).length;
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileNav ? "show" : ""}`}>
@@ -1555,6 +1864,9 @@ export default function Home() {
                   {item.name === "My tasks" && todayTasks.length > 0 && (
                     <small className="nav-count">{todayTasks.length}</small>
                   )}
+                  {item.name === "Notifications" && unreadNotifications > 0 && (
+                    <small className="nav-count">{unreadNotifications}</small>
+                  )}
                 </button>
               ))}
             </div>
@@ -1608,6 +1920,17 @@ export default function Home() {
             >
               <Activity size={17} />
             </button>
+            <button
+              className="icon-button notification-trigger"
+              aria-label={`${unreadNotifications} unread notifications`}
+              title="Notifications"
+              onClick={() => setSection("Notifications")}
+            >
+              <Bell size={17} />
+              {unreadNotifications > 0 && (
+                <i>{Math.min(unreadNotifications, 99)}</i>
+              )}
+            </button>
             <button className="help-button" onClick={() => setSection("Help")}>
               <CircleHelp size={16} />
               <span>Help</span>
@@ -1653,7 +1976,9 @@ export default function Home() {
                     ? "commitment"
                     : section === "Projects"
                       ? "project"
-                      : "task",
+                      : section === "Milestones"
+                        ? "milestone"
+                        : "task",
                 )
               }
             >
@@ -1662,7 +1987,9 @@ export default function Home() {
                 ? "commitment"
                 : section === "Projects"
                   ? "project"
-                  : "task"}
+                  : section === "Milestones"
+                    ? "milestone"
+                    : "task"}
             </button>
           </div>
           {timezonePrompt && (
@@ -2206,6 +2533,476 @@ export default function Home() {
                     change workspace content or manage members.
                   </p>
                 </div>
+              )}
+            </div>
+          ) : section === "Availability" ? (
+            <div className="panel simple-panel">
+              <div className="panel-kicker">DISTRIBUTED TEAM TIME</div>
+              <h2>Set your working hours</h2>
+              <p className="settings-description">
+                Hours are interpreted in your saved timezone ({zone}). Common
+                slots below exclude your team’s scheduled meetings and respect
+                each member’s workdays.
+              </p>
+              <div className="availability-form">
+                <label>
+                  Availability status
+                  <select
+                    value={availabilityDraft.status}
+                    onChange={(event) =>
+                      setAvailabilityDraft({
+                        ...availabilityDraft,
+                        status: event.target.value,
+                      })
+                    }
+                  >
+                    {["Auto", "Available", "Busy", "Focus time", "Away"].map(
+                      (status) => (
+                        <option key={status}>{status}</option>
+                      ),
+                    )}
+                  </select>
+                </label>
+                <label>
+                  Start
+                  <input
+                    type="time"
+                    value={availabilityDraft.start}
+                    onChange={(event) =>
+                      setAvailabilityDraft({
+                        ...availabilityDraft,
+                        start: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  End
+                  <input
+                    type="time"
+                    value={availabilityDraft.end}
+                    onChange={(event) =>
+                      setAvailabilityDraft({
+                        ...availabilityDraft,
+                        end: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+              </div>
+              <div className="working-days">
+                {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(
+                  (day, index) => (
+                    <button
+                      key={day}
+                      className={
+                        availabilityDraft.workingDays.includes(index)
+                          ? "working-day selected"
+                          : "working-day"
+                      }
+                      aria-pressed={availabilityDraft.workingDays.includes(
+                        index,
+                      )}
+                      onClick={() =>
+                        setAvailabilityDraft({
+                          ...availabilityDraft,
+                          workingDays: availabilityDraft.workingDays.includes(
+                            index,
+                          )
+                            ? availabilityDraft.workingDays.filter(
+                                (value) => value !== index,
+                              )
+                            : [...availabilityDraft.workingDays, index].sort(),
+                        })
+                      }
+                    >
+                      {day}
+                    </button>
+                  ),
+                )}
+              </div>
+              <button
+                className="secondary-button"
+                disabled={
+                  !availabilityDraft.workingDays.length ||
+                  availabilityDraft.start >= availabilityDraft.end
+                }
+                onClick={saveAvailability}
+              >
+                Save availability
+              </button>
+              <div className="settings-subheading">
+                <div className="panel-kicker">YOUR TEAM RIGHT NOW</div>
+                <h3>Local time and availability</h3>
+              </div>
+              {members.map((member) => (
+                <div className="settings-line" key={member.id}>
+                  <div>
+                    <b>
+                      {member.displayName || member.email}
+                      {member.id === user.uid ? " · You" : ""}
+                    </b>
+                    <small>
+                      {member.timezone || "Timezone not set"} ·{" "}
+                      {formatMemberTime(clockNow, member.timezone || "UTC")}
+                    </small>
+                  </div>
+                  <span className="availability-chip">
+                    {getMemberAvailability(member, tasks, clockNow)}
+                  </span>
+                </div>
+              ))}
+              <div className="settings-subheading">
+                <div className="panel-kicker">FIND A TIME</div>
+                <h3>Shared 30-minute windows</h3>
+                <p>
+                  Windows use everyone’s working hours and avoid the team’s
+                  current scheduled meetings. Connect calendars for conflict
+                  checks across personal events.
+                </p>
+              </div>
+              {commonTimeSlots.map((slot) => (
+                <div
+                  className="settings-line common-slot"
+                  key={slot.toISOString()}
+                >
+                  <div>
+                    <b>{formatInstantInTimezone(slot, zone)}</b>
+                    <small>
+                      {members
+                        .map(
+                          (member) =>
+                            `${member.displayName || member.email}: ${formatInstantInTimezone(slot, member.timezone || "UTC")}`,
+                        )
+                        .join(" · ")}
+                    </small>
+                  </div>
+                  <button
+                    className="text-action"
+                    onClick={() => {
+                      setSection("Meetings");
+                      setToast(
+                        "Select a task to create a Google Calendar event for this time.",
+                      );
+                    }}
+                  >
+                    Plan meeting
+                  </button>
+                </div>
+              ))}
+              {!commonTimeSlots.length && (
+                <p className="form-hint">
+                  No shared work-hour window found in the next two weeks. Adjust
+                  your schedules or availability status.
+                </p>
+              )}
+            </div>
+          ) : section === "Milestones" ? (
+            <div className="panel simple-panel">
+              <div className="panel-kicker">COMPANY OUTCOMES</div>
+              <h2>Milestones</h2>
+              <p className="settings-description">
+                Track outcomes the team is moving toward. Link each milestone to
+                a project through its title and description.
+              </p>
+              {milestones.map((milestone) => (
+                <div className="settings-line" key={milestone.id}>
+                  <div>
+                    <b>{milestone.title}</b>
+                    <small>
+                      {milestone.description || "Outcome milestone"} ·{" "}
+                      {members.find(
+                        (member) => member.id === milestone.ownerUid,
+                      )?.displayName || "Team"}{" "}
+                      · Due {formatDue(milestone, zone)}
+                    </small>
+                  </div>
+                  <span
+                    className={`status-chip ${(milestone.status || "planned").toLowerCase()}`}
+                  >
+                    {milestone.status}
+                  </span>
+                  {memberRole !== "Viewer" && (
+                    <button
+                      className="text-action"
+                      onClick={() => void changeMilestone(milestone)}
+                    >
+                      {milestone.status === "Completed" ? "Reopen" : "Complete"}
+                    </button>
+                  )}
+                </div>
+              ))}
+              {!milestones.length && (
+                <Empty
+                  title="No milestones yet."
+                  text="Add a company outcome and give it an owner and target date."
+                  action={() => open("milestone")}
+                />
+              )}
+            </div>
+          ) : section === "Timeline" ? (
+            <div className="panel simple-panel">
+              <div className="panel-kicker">WHAT HAPPENS NEXT</div>
+              <h2>Company timeline</h2>
+              <p className="settings-description">
+                Tasks, promises, milestones, and scheduled meetings in your
+                local time ({zone}).
+              </p>
+              {timelineItems.map((item) => (
+                <div
+                  className="timeline-row"
+                  key={`${item.timelineType}-${item.id}`}
+                >
+                  <div className="timeline-marker" />
+                  <div className="timeline-date">
+                    {formatInstantInTimezone(item.timelineAt, zone)}
+                  </div>
+                  <div className="timeline-copy">
+                    <small>{item.timelineType}</small>
+                    <b>{item.title || item.description}</b>
+                    <span>{item.status || "Scheduled"}</span>
+                  </div>
+                </div>
+              ))}
+              {!timelineItems.length && (
+                <Empty
+                  title="Your timeline is clear."
+                  text="Add due dates and milestones to see what happens next."
+                />
+              )}
+            </div>
+          ) : section === "Accountability" ? (
+            <div className="panel simple-panel">
+              <div className="panel-kicker">REFLECT, DON’T COMPETE</div>
+              <h2>Team accountability</h2>
+              <p className="settings-description">
+                Completion and overdue work are based on assigned tasks. On-time
+                rate uses recorded completion timestamps and due dates.
+              </p>
+              {members.map((member) => {
+                const assigned = tasks.filter(
+                  (task) => task.ownerUid === member.id,
+                );
+                const completed = assigned.filter(
+                  (task) => task.status === "Completed",
+                );
+                const overdue = assigned.filter(
+                  (task) =>
+                    task.status !== "Completed" &&
+                    dueInstant(task) &&
+                    dueInstant(task)! < clockNow,
+                );
+                const onTime = completed.filter(
+                  (task) =>
+                    task.completedAt &&
+                    dueInstant(task) &&
+                    (task.completedAt.toDate
+                      ? task.completedAt.toDate()
+                      : new Date(task.completedAt)) <= dueInstant(task)!,
+                );
+                const scored = completed.filter(
+                  (task) => task.completedAt && dueInstant(task),
+                );
+                return (
+                  <div className="accountability-row" key={member.id}>
+                    <div>
+                      <b>{member.displayName || member.email}</b>
+                      <small>{member.title || member.role}</small>
+                    </div>
+                    <span>{completed.length} done</span>
+                    <span>
+                      {scored.length
+                        ? Math.round((onTime.length / scored.length) * 100)
+                        : "—"}
+                      % on time
+                    </span>
+                    <span>{overdue.length} overdue</span>
+                  </div>
+                );
+              })}
+              <div className="settings-subheading">
+                <div className="panel-kicker">TEAM SNAPSHOT</div>
+                <h3>
+                  {tasks.filter((task) => task.status === "Completed").length}{" "}
+                  of {tasks.length} tasks completed ·{" "}
+                  {
+                    commitments.filter(
+                      (commitment) => commitment.status === "Missed",
+                    ).length
+                  }{" "}
+                  missed commitments
+                </h3>
+              </div>
+            </div>
+          ) : section === "Weekly review" ? (
+            <div className="panel simple-panel">
+              <div className="panel-kicker">CLOSE THE LOOP</div>
+              <h2>Weekly review</h2>
+              <p className="settings-description">
+                Capture what happened and carry the right priorities into next
+                week. Revisions preserve prior versions.
+              </p>
+              <div className="company-form review-form">
+                <label>
+                  Week starting
+                  <input
+                    type="date"
+                    value={reviewDraft.weekStart}
+                    onChange={(event) =>
+                      setReviewDraft({
+                        ...reviewDraft,
+                        weekStart: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  What went well?
+                  <textarea
+                    maxLength={4000}
+                    rows={3}
+                    value={reviewDraft.wins}
+                    onChange={(event) =>
+                      setReviewDraft({
+                        ...reviewDraft,
+                        wins: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  What slipped or was missed?
+                  <textarea
+                    maxLength={4000}
+                    rows={3}
+                    value={reviewDraft.misses}
+                    onChange={(event) =>
+                      setReviewDraft({
+                        ...reviewDraft,
+                        misses: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  What is blocked?
+                  <textarea
+                    maxLength={4000}
+                    rows={3}
+                    value={reviewDraft.blockers}
+                    onChange={(event) =>
+                      setReviewDraft({
+                        ...reviewDraft,
+                        blockers: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Next week’s priorities
+                  <textarea
+                    maxLength={4000}
+                    rows={3}
+                    value={reviewDraft.priorities}
+                    onChange={(event) =>
+                      setReviewDraft({
+                        ...reviewDraft,
+                        priorities: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Reflection
+                  <textarea
+                    maxLength={4000}
+                    rows={3}
+                    value={reviewDraft.reflection}
+                    onChange={(event) =>
+                      setReviewDraft({
+                        ...reviewDraft,
+                        reflection: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+              </div>
+              <button
+                className="primary-button"
+                disabled={busy || !reviewDraft.weekStart}
+                onClick={saveWeeklyReview}
+              >
+                {busy ? "Saving…" : "Save weekly review"}
+              </button>
+              <div className="settings-subheading">
+                <div className="panel-kicker">TEAM REVIEW HISTORY</div>
+              </div>
+              {weeklyReviews.map((review) => (
+                <div className="settings-line" key={review.id}>
+                  <div>
+                    <b>
+                      {members.find((member) => member.id === review.ownerUid)
+                        ?.displayName || "Team member"}{" "}
+                      · week of {review.weekStart}
+                    </b>
+                    <small>
+                      Wins: {review.wins || "—"} · Next:{" "}
+                      {review.priorities || "—"}
+                    </small>
+                  </div>
+                  <span className="secure-chip">Saved</span>
+                </div>
+              ))}
+            </div>
+          ) : section === "Notifications" ? (
+            <div className="panel simple-panel">
+              <div className="panel-kicker">IN-APP UPDATES</div>
+              <h2>Your notifications</h2>
+              <p className="settings-description">
+                Assignments and task-thread updates for this account. Email and
+                WhatsApp delivery need production providers and are not
+                simulated.
+              </p>
+              {notifications.map((notification) => (
+                <button
+                  className={`notification-row ${notification.read ? "read" : "unread"}`}
+                  key={notification.id}
+                  onClick={() => {
+                    void markNotificationRead(notification);
+                    const task = tasks.find(
+                      (item) => item.id === notification.targetId,
+                    );
+                    if (task) {
+                      setSelectedTask(task);
+                      setDescription(task.description || "");
+                    }
+                  }}
+                >
+                  <span className="notification-dot" />
+                  <span>
+                    <b>{notification.title}</b>
+                    <small>
+                      {notification.body} ·{" "}
+                      {notification.createdAt?.toDate
+                        ? formatDateInTimezone(
+                            notification.createdAt.toDate(),
+                            zone,
+                          )
+                        : "Just now"}
+                    </small>
+                  </span>
+                  {notification.read ? (
+                    <span className="secure-chip">Read</span>
+                  ) : (
+                    <span className="role-chip">New</span>
+                  )}
+                </button>
+              ))}
+              {!notifications.length && (
+                <Empty
+                  title="You’re all caught up."
+                  text="Task assignments and replies will appear here."
+                />
               )}
             </div>
           ) : section === "Settings" ? (
@@ -2871,18 +3668,28 @@ export default function Home() {
             <label>
               {modal === "commitment"
                 ? "What are you committing to?"
-                : "What needs to get done?"}
+                : modal === "milestone"
+                  ? "What outcome will the company reach?"
+                  : modal === "project"
+                    ? "What are you building?"
+                    : "What needs to get done?"}
               <input
                 autoFocus
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder={
-                  modal === "commitment" ? "I will…" : "Give it a clear name"
+                  modal === "commitment"
+                    ? "I will…"
+                    : modal === "milestone"
+                      ? "A measurable company outcome"
+                      : "Give it a clear name"
                 }
                 onKeyDown={(e) => e.key === "Enter" && create()}
               />
             </label>
-            {(modal === "task" || modal === "project") && (
+            {(modal === "task" ||
+              modal === "project" ||
+              modal === "milestone") && (
               <label>
                 Details and context
                 <textarea
@@ -2894,9 +3701,9 @@ export default function Home() {
                 />
               </label>
             )}
-            {modal === "task" && (
+            {(modal === "task" || modal === "milestone") && (
               <label>
-                Task owner
+                {modal === "milestone" ? "Milestone owner" : "Task owner"}
                 <select
                   value={taskOwnerUid}
                   onChange={(event) => setTaskOwnerUid(event.target.value)}
