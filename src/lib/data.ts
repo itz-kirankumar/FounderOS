@@ -155,6 +155,9 @@ export async function acceptInvitation(
       role: data.role,
       inviteId: token,
       timezone: preferredTimezone,
+      country: profileData.country || "",
+      region: profileData.region || "",
+      title: "",
       joinedAt: serverTimestamp(),
     });
     transaction.update(invitationRef, {
@@ -223,6 +226,8 @@ export async function ensureWorkspace(
     {
       ...profile,
       timezone,
+      country: existingProfile.country || "",
+      region: existingProfile.region || "",
       timezoneSource: existingProfile.timezoneSource || "detected",
       timezoneConfirmed: existingProfile.timezoneConfirmed === true,
       teamIds:
@@ -259,6 +264,8 @@ export async function ensureWorkspace(
       ownerUid: uid,
       createdAt: serverTimestamp(),
       timezone,
+      defaultTimezone: timezone,
+      companyProfileComplete: false,
     });
     await setDoc(doc(db, "teams", teamRef.id, "members", uid), {
       uid,
@@ -266,6 +273,9 @@ export async function ensureWorkspace(
       email: profile.email,
       role: "Owner",
       timezone,
+      country: existingProfile.country || "",
+      region: existingProfile.region || "",
+      title: "Founder",
       joinedAt: serverTimestamp(),
     });
     const starterBatch = writeBatch(db);

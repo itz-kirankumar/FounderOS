@@ -130,6 +130,18 @@ function formatDue(item: Item, timezone: string) {
     return formatInstantInTimezone(date, "UTC");
   }
 }
+function formatMemberTime(date: Date, timezone: string) {
+  try {
+    return new Intl.DateTimeFormat("en", {
+      timeZone: timezone,
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+    }).format(date);
+  } catch {
+    return "Timezone unavailable";
+  }
+}
 
 export default function Home() {
   const [user, setUser] = useState<User | null>(null),
@@ -140,6 +152,23 @@ export default function Home() {
   const [invitations, setInvitations] = useState<Item[]>([]);
   const [memberRole, setMemberRole] = useState<TeamRole>("Member");
   const [teamName, setTeamName] = useState("");
+  const [company, setCompany] = useState<Item | null>(null);
+  const [companyDraft, setCompanyDraft] = useState({
+    name: "",
+    legalName: "",
+    website: "",
+    industry: "",
+    stage: "",
+    country: "",
+    region: "",
+    defaultTimezone: "UTC",
+  });
+  const [locationDraft, setLocationDraft] = useState({
+    country: "",
+    region: "",
+  });
+  const [memberTitleDraft, setMemberTitleDraft] = useState("");
+  const [clockNow, setClockNow] = useState(() => new Date());
   const [pendingInvite, setPendingInvite] = useState<{
     teamId: string;
     token: string;
@@ -349,13 +378,44 @@ export default function Home() {
       },
     );
     const unsubscribeTeam = onSnapshot(doc(db, "teams", teamId), (snapshot) => {
-      setTeamName(snapshot.data()?.name || "Founder workspace");
+      const data = snapshot.data() || {};
+      setCompany({ id: snapshot.id, ...data });
+      setTeamName(data.name || "Founder workspace");
     });
     return () => {
       unsubscribeMembers();
       unsubscribeTeam();
     };
   }, [teamId, user]);
+  useEffect(() => {
+    if (!company) return;
+    setCompanyDraft({
+      name: company.name || "",
+      legalName: company.legalName || "",
+      website: company.website || "",
+      industry: company.industry || "",
+      stage: company.stage || "",
+      country: company.country || "",
+      region: company.region || "",
+      defaultTimezone: company.defaultTimezone || company.timezone || zone,
+    });
+  }, [company, zone]);
+  useEffect(() => {
+    setLocationDraft({
+      country: profile?.country || "",
+      region: profile?.region || "",
+    });
+  }, [profile]);
+  useEffect(() => {
+    if (!user) return;
+    setMemberTitleDraft(
+      members.find((member) => member.id === user.uid)?.title || "",
+    );
+  }, [members, user]);
+  useEffect(() => {
+    const interval = window.setInterval(() => setClockNow(new Date()), 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
   useEffect(() => {
     if (!user || !profile) return;
     const ids = Array.from(
@@ -800,12 +860,19 @@ export default function Home() {
   ) => {
     if (!user) return;
     try {
-      await updateDoc(doc(db, "users", user.uid), {
+      const batch = writeBatch(db);
+      batch.update(doc(db, "users", user.uid), {
         timezone,
         timezoneSource: source,
         timezoneConfirmed: true,
         updatedAt: serverTimestamp(),
       });
+      if (teamId) {
+        batch.update(doc(db, "teams", teamId, "members", user.uid), {
+          timezone,
+        });
+      }
+      await batch.commit();
       setZone(timezone);
       setTimezoneDraft(timezone);
       setTimezonePrompt(null);
@@ -813,6 +880,66 @@ export default function Home() {
       setTimeout(() => setToast(""), 2400);
     } catch {
       setToast("Could not save your timezone. Try again.");
+    }
+  };
+  const saveCompany = async () => {
+    if (!teamId || !canManageTeam || !companyDraft.name.trim()) return;
+    setBusy(true);
+    const values = {
+      name: companyDraft.name.trim(),
+      legalName: companyDraft.legalName.trim(),
+      website: companyDraft.website.trim(),
+      industry: companyDraft.industry.trim(),
+      stage: companyDraft.stage,
+      country: companyDraft.country.trim(),
+      region: companyDraft.region.trim(),
+      defaultTimezone: companyDraft.defaultTimezone,
+      timezone: companyDraft.defaultTimezone,
+      companyProfileComplete: true,
+      profileCompletedAt: serverTimestamp(),
+    };
+    try {
+      await updateDoc(doc(db, "teams", teamId), values);
+      setTeamName(values.name);
+      setToast("Company profile saved");
+    } catch {
+      setToast(
+        "Could not save company profile. Check your access and connection.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const saveLocation = async () => {
+    if (!user || !teamId) return;
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, "users", user.uid), {
+        country: locationDraft.country.trim(),
+        region: locationDraft.region.trim(),
+        updatedAt: serverTimestamp(),
+      });
+      batch.update(doc(db, "teams", teamId, "members", user.uid), {
+        country: locationDraft.country.trim(),
+        region: locationDraft.region.trim(),
+      });
+      await batch.commit();
+      setToast("Your location is visible to your team");
+    } catch {
+      setToast("Could not save your location. Try again.");
+    }
+  };
+  const saveMemberTitle = async (member: Item, titleValue: string) => {
+    if (!teamId || !user || (member.id !== user.uid && !canManageTeam)) return;
+    const title = titleValue.trim().slice(0, 80);
+    if ((member.title || "") === title) return;
+    try {
+      await updateDoc(doc(db, "teams", teamId, "members", member.id), {
+        title,
+      });
+      setToast("Team title updated");
+    } catch {
+      setToast("Could not update this business title.");
     }
   };
   const displayName = user?.displayName?.split(" ")[0] || "Founder";
@@ -1052,6 +1179,131 @@ export default function Home() {
       </main>
     );
 
+  if (
+    user &&
+    teamId &&
+    company &&
+    company.companyProfileComplete !== true &&
+    memberRole === "Owner"
+  )
+    return (
+      <main className="setup-shell">
+        <section className="setup-card">
+          <div className="brand-mark">
+            <Command size={17} />
+          </div>
+          <div className="panel-kicker">FIRST, SET UP YOUR COMPANY</div>
+          <h1>Give your team a shared home.</h1>
+          <p className="setup-intro">
+            Add the company basics and a default timezone. Each teammate keeps
+            their own local timezone, so deadlines and meeting times stay clear
+            across countries.
+          </p>
+          <div className="company-form">
+            <label>
+              Company name{" "}
+              <input
+                required
+                maxLength={120}
+                value={companyDraft.name}
+                onChange={(event) =>
+                  setCompanyDraft({ ...companyDraft, name: event.target.value })
+                }
+                placeholder="e.g. Acme Labs"
+              />
+            </label>
+            <label>
+              Country{" "}
+              <input
+                maxLength={80}
+                value={companyDraft.country}
+                onChange={(event) =>
+                  setCompanyDraft({
+                    ...companyDraft,
+                    country: event.target.value,
+                  })
+                }
+                placeholder="e.g. India"
+              />
+            </label>
+            <label>
+              Region or state{" "}
+              <input
+                maxLength={80}
+                value={companyDraft.region}
+                onChange={(event) =>
+                  setCompanyDraft({
+                    ...companyDraft,
+                    region: event.target.value,
+                  })
+                }
+                placeholder="e.g. Karnataka"
+              />
+            </label>
+            <label>
+              Company timezone{" "}
+              <select
+                value={companyDraft.defaultTimezone}
+                onChange={(event) =>
+                  setCompanyDraft({
+                    ...companyDraft,
+                    defaultTimezone: event.target.value,
+                  })
+                }
+              >
+                {[
+                  ...new Set([
+                    companyDraft.defaultTimezone,
+                    ...timezoneOptions,
+                  ]),
+                ].map((value) => (
+                  <option key={value}>{value}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <button
+            className="primary-button setup-submit"
+            disabled={
+              busy || !companyDraft.name.trim() || !companyDraft.country.trim()
+            }
+            onClick={saveCompany}
+          >
+            {busy ? "Saving…" : "Set up company"}
+            <ArrowRight size={15} />
+          </button>
+          <small>
+            Team members can add their own region and timezone after you invite
+            them.
+          </small>
+        </section>
+      </main>
+    );
+  if (
+    user &&
+    teamId &&
+    company &&
+    company.companyProfileComplete !== true &&
+    memberRole !== "Owner"
+  )
+    return (
+      <main className="setup-shell">
+        <section className="setup-card">
+          <div className="brand-mark">
+            <Clock3 size={17} />
+          </div>
+          <div className="panel-kicker">COMPANY SETUP IN PROGRESS</div>
+          <h1>Your team workspace is getting ready.</h1>
+          <p className="setup-intro">
+            The workspace owner is adding the company profile. You can continue
+            once setup is complete.
+          </p>
+          <button className="secondary-button" onClick={() => signOut(auth)}>
+            <LogOut size={15} /> Sign out
+          </button>
+        </section>
+      </main>
+    );
   const rows =
     section === "My tasks"
       ? tasks.filter((task) => task.ownerUid === user.uid)
@@ -1629,6 +1881,11 @@ export default function Home() {
                   {members.length} {members.length === 1 ? "member" : "members"}
                 </span>
               </div>
+              <p className="settings-description">
+                Business titles such as Co-founder are separate from access
+                roles. Location and live local time help your team coordinate
+                across regions.
+              </p>
               {members.map((member) => (
                 <div className="member-row" key={member.id}>
                   <div className="profile-avatar">
@@ -1641,41 +1898,66 @@ export default function Home() {
                       {member.displayName || "FounderOS member"}
                       {member.id === user.uid ? " · You" : ""}
                     </b>
-                    <small>{member.email}</small>
+                    <small>
+                      {member.title || "Team member"} · {member.email}
+                    </small>
+                    <small>
+                      {[member.region, member.country]
+                        .filter(Boolean)
+                        .join(", ") || "Location not set"}{" "}
+                      · {member.timezone || "Timezone not set"}
+                    </small>
+                    {member.timezone && (
+                      <small className="member-local-time">
+                        Local time {formatMemberTime(clockNow, member.timezone)}
+                      </small>
+                    )}
                   </div>
-                  {canManageTeam &&
-                  member.id !== user.uid &&
-                  member.role !== "Owner" ? (
+                  {canManageTeam && member.id !== user.uid ? (
                     <div className="member-controls">
-                      <select
-                        aria-label={`Role for ${member.email}`}
-                        value={member.role}
-                        onChange={(event) =>
-                          changeMemberRole(
-                            member,
-                            event.target.value as TeamRole,
-                          )
+                      <input
+                        aria-label={`Business title for ${member.email}`}
+                        className="member-title-input"
+                        defaultValue={member.title || ""}
+                        placeholder="Business title · e.g. Co-founder"
+                        maxLength={80}
+                        onBlur={(event) =>
+                          saveMemberTitle(member, event.target.value)
                         }
-                      >
-                        {(memberRole === "Owner"
-                          ? ["Admin", "Member", "Viewer"]
-                          : ["Member", "Viewer"]
-                        ).map((role) => (
-                          <option key={role}>{role}</option>
-                        ))}
-                      </select>
-                      {(memberRole === "Owner" ||
-                        ["Member", "Viewer"].includes(member.role)) && (
-                        <button
-                          className="text-action danger-action"
-                          onClick={() => removeMember(member)}
-                        >
-                          Remove
-                        </button>
+                      />
+                      {member.role !== "Owner" && (
+                        <>
+                          <select
+                            aria-label={`Role for ${member.email}`}
+                            value={member.role}
+                            onChange={(event) =>
+                              changeMemberRole(
+                                member,
+                                event.target.value as TeamRole,
+                              )
+                            }
+                          >
+                            {(memberRole === "Owner"
+                              ? ["Admin", "Member", "Viewer"]
+                              : ["Member", "Viewer"]
+                            ).map((role) => (
+                              <option key={role}>{role}</option>
+                            ))}
+                          </select>
+                          {(memberRole === "Owner" ||
+                            ["Member", "Viewer"].includes(member.role)) && (
+                            <button
+                              className="text-action danger-action"
+                              onClick={() => removeMember(member)}
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
                   ) : (
-                    <span className="role-chip">{member.role}</span>
+                    <span className="role-chip">{member.role} access</span>
                   )}
                 </div>
               ))}
@@ -1777,12 +2059,258 @@ export default function Home() {
             </div>
           ) : section === "Settings" ? (
             <div className="panel simple-panel">
-              <div className="panel-kicker">YOUR PREFERENCES</div>
-              <h2>Workspace settings</h2>
+              <div className="panel-kicker">COMPANY & TEAM SETTINGS</div>
+              <h2>Company profile</h2>
+              <p className="settings-description">
+                A shared company identity for everyone in this workspace.
+                Company defaults help teams coordinate; each person’s own
+                timezone remains independent.
+              </p>
+              <div className="company-form settings-company-form">
+                <label>
+                  Company name{" "}
+                  <input
+                    maxLength={120}
+                    disabled={!canManageTeam}
+                    value={companyDraft.name}
+                    onChange={(event) =>
+                      setCompanyDraft({
+                        ...companyDraft,
+                        name: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Legal name{" "}
+                  <input
+                    maxLength={160}
+                    disabled={!canManageTeam}
+                    value={companyDraft.legalName}
+                    onChange={(event) =>
+                      setCompanyDraft({
+                        ...companyDraft,
+                        legalName: event.target.value,
+                      })
+                    }
+                    placeholder="Optional"
+                  />
+                </label>
+                <label>
+                  Website{" "}
+                  <input
+                    type="url"
+                    maxLength={200}
+                    disabled={!canManageTeam}
+                    value={companyDraft.website}
+                    onChange={(event) =>
+                      setCompanyDraft({
+                        ...companyDraft,
+                        website: event.target.value,
+                      })
+                    }
+                    placeholder="https://example.com"
+                  />
+                </label>
+                <label>
+                  Industry{" "}
+                  <input
+                    maxLength={100}
+                    disabled={!canManageTeam}
+                    value={companyDraft.industry}
+                    onChange={(event) =>
+                      setCompanyDraft({
+                        ...companyDraft,
+                        industry: event.target.value,
+                      })
+                    }
+                    placeholder="e.g. SaaS"
+                  />
+                </label>
+                <label>
+                  Company stage{" "}
+                  <select
+                    disabled={!canManageTeam}
+                    value={companyDraft.stage}
+                    onChange={(event) =>
+                      setCompanyDraft({
+                        ...companyDraft,
+                        stage: event.target.value,
+                      })
+                    }
+                  >
+                    <option value="">Choose stage</option>
+                    {[
+                      "Idea",
+                      "Pre-seed",
+                      "Seed",
+                      "Series A",
+                      "Series B+",
+                      "Bootstrapped",
+                      "Growth",
+                      "Other",
+                    ].map((stage) => (
+                      <option key={stage}>{stage}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Headquarters country{" "}
+                  <input
+                    maxLength={80}
+                    disabled={!canManageTeam}
+                    value={companyDraft.country}
+                    onChange={(event) =>
+                      setCompanyDraft({
+                        ...companyDraft,
+                        country: event.target.value,
+                      })
+                    }
+                    placeholder="e.g. India"
+                  />
+                </label>
+                <label>
+                  Headquarters region{" "}
+                  <input
+                    maxLength={80}
+                    disabled={!canManageTeam}
+                    value={companyDraft.region}
+                    onChange={(event) =>
+                      setCompanyDraft({
+                        ...companyDraft,
+                        region: event.target.value,
+                      })
+                    }
+                    placeholder="e.g. Karnataka"
+                  />
+                </label>
+                <label>
+                  Company default timezone{" "}
+                  <select
+                    disabled={!canManageTeam}
+                    value={companyDraft.defaultTimezone}
+                    onChange={(event) =>
+                      setCompanyDraft({
+                        ...companyDraft,
+                        defaultTimezone: event.target.value,
+                      })
+                    }
+                  >
+                    {[
+                      ...new Set([
+                        companyDraft.defaultTimezone,
+                        ...timezoneOptions,
+                      ]),
+                    ].map((value) => (
+                      <option key={value}>{value}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              {canManageTeam && (
+                <button
+                  className="secondary-button company-save"
+                  disabled={busy || !companyDraft.name.trim()}
+                  onClick={saveCompany}
+                >
+                  Save company profile
+                </button>
+              )}
+              <div className="settings-subheading">
+                <div className="panel-kicker">YOUR TEAM PROFILE</div>
+                <h3>How teammates know you</h3>
+                <p>
+                  Your business title is separate from access permissions. Use
+                  titles like Co-founder, CEO, or CTO.
+                </p>
+              </div>
+              <div className="company-form location-form">
+                <label>
+                  Business title
+                  <input
+                    maxLength={80}
+                    value={memberTitleDraft}
+                    onChange={(event) =>
+                      setMemberTitleDraft(event.target.value)
+                    }
+                    placeholder="e.g. Co-founder"
+                  />
+                </label>
+              </div>
+              <button
+                className="secondary-button company-save"
+                disabled={
+                  memberTitleDraft ===
+                  (members.find((member) => member.id === user.uid)?.title ||
+                    "")
+                }
+                onClick={() => {
+                  const self = members.find((member) => member.id === user.uid);
+                  if (self) void saveMemberTitle(self, memberTitleDraft);
+                }}
+              >
+                Save business title
+              </button>
+              <div className="settings-subheading">
+                <div className="panel-kicker">YOUR LOCATION</div>
+                <h3>Help teammates find a good time to connect</h3>
+                <p>
+                  Visible to workspace members. Use a city, state, region, or
+                  country (for example Nairobi, Kenya or Lagos, Nigeria).
+                </p>
+              </div>
+              <div className="company-form location-form">
+                <label>
+                  Country{" "}
+                  <input
+                    maxLength={80}
+                    value={locationDraft.country}
+                    onChange={(event) =>
+                      setLocationDraft({
+                        ...locationDraft,
+                        country: event.target.value,
+                      })
+                    }
+                    placeholder="e.g. Kenya"
+                  />
+                </label>
+                <label>
+                  Region or city{" "}
+                  <input
+                    maxLength={80}
+                    value={locationDraft.region}
+                    onChange={(event) =>
+                      setLocationDraft({
+                        ...locationDraft,
+                        region: event.target.value,
+                      })
+                    }
+                    placeholder="e.g. Nairobi"
+                  />
+                </label>
+              </div>
+              <button
+                className="secondary-button company-save"
+                disabled={
+                  locationDraft.country === (profile?.country || "") &&
+                  locationDraft.region === (profile?.region || "")
+                }
+                onClick={saveLocation}
+              >
+                Save location
+              </button>
+              <div className="settings-subheading">
+                <div className="panel-kicker">YOUR PREFERENCES</div>
+                <h3>Local timezone</h3>
+                <p>
+                  Your own timezone controls how dates and meeting times appear
+                  for you.
+                </p>
+              </div>
               <div className="settings-line">
                 <div>
-                  <b>Local timezone</b>
-                  <small>Times in your workspace use this IANA timezone.</small>
+                  <b>Personal timezone</b>
+                  <small>Team members may be in different timezones.</small>
                 </div>
                 <div className="timezone-setting-control">
                   <select

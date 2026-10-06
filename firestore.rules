@@ -63,9 +63,11 @@ service cloud.firestore {
       allow create, update: if signedIn()
         && request.auth.uid == userId
         && request.resource.data.keys().hasOnly([
-          'displayName', 'email', 'photoURL', 'timezone', 'locale', 'timeFormat',
+          'displayName', 'email', 'photoURL', 'timezone', 'locale', 'timeFormat', 'country', 'region',
           'timezoneSource', 'timezoneConfirmed', 'teamId', 'teamIds', 'updatedAt'
         ])
+        && (!('country' in request.resource.data) || (request.resource.data.country is string && request.resource.data.country.size() <= 80))
+        && (!('region' in request.resource.data) || (request.resource.data.region is string && request.resource.data.region.size() <= 80))
         && request.resource.data.updatedAt == request.time;
       allow delete: if false;
     }
@@ -73,15 +75,37 @@ service cloud.firestore {
     match /teams/{teamId} {
       allow create: if signedIn()
         && request.resource.data.ownerUid == request.auth.uid
-        && request.resource.data.keys().hasOnly(['name', 'ownerUid', 'timezone', 'createdAt'])
+        && request.resource.data.keys().hasOnly([
+          'name', 'ownerUid', 'timezone', 'defaultTimezone', 'companyProfileComplete',
+          'legalName', 'website', 'industry', 'stage', 'country', 'region', 'profileCompletedAt', 'createdAt'
+        ])
         && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 120
+        && (!('defaultTimezone' in request.resource.data) || request.resource.data.defaultTimezone is string)
+        && (!('companyProfileComplete' in request.resource.data) || request.resource.data.companyProfileComplete is bool)
         && request.resource.data.createdAt == request.time;
       allow read: if isMember(teamId);
       allow update: if isMember(teamId)
-        && isOwner(teamId)
+        && isAdmin(teamId)
         && request.resource.data.ownerUid == resource.data.ownerUid
         && request.resource.data.createdAt == resource.data.createdAt
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'timezone']);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name', 'timezone', 'defaultTimezone', 'companyProfileComplete', 'legalName',
+          'website', 'industry', 'stage', 'country', 'region', 'profileCompletedAt'
+        ])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 120
+        && (!('legalName' in request.resource.data) || (request.resource.data.legalName is string && request.resource.data.legalName.size() <= 160))
+        && (!('website' in request.resource.data) || (request.resource.data.website is string && request.resource.data.website.size() <= 200))
+        && (!('industry' in request.resource.data) || (request.resource.data.industry is string && request.resource.data.industry.size() <= 100))
+        && (!('stage' in request.resource.data) || (request.resource.data.stage is string && request.resource.data.stage.size() <= 40))
+        && (!('country' in request.resource.data) || (request.resource.data.country is string && request.resource.data.country.size() <= 80))
+        && (!('region' in request.resource.data) || (request.resource.data.region is string && request.resource.data.region.size() <= 80))
+        && (!('defaultTimezone' in request.resource.data) || request.resource.data.defaultTimezone is string)
+        && (!('companyProfileComplete' in request.resource.data) || request.resource.data.companyProfileComplete is bool)
+        && (!('profileCompletedAt' in request.resource.data) || request.resource.data.profileCompletedAt == request.time);
       allow delete: if false;
 
       match /members/{memberId} {
@@ -90,7 +114,7 @@ service cloud.firestore {
           && memberId == request.auth.uid
           && request.resource.data.uid == memberId
           && request.resource.data.role == 'Owner'
-          && request.resource.data.keys().hasOnly(['uid', 'displayName', 'email', 'role', 'timezone', 'joinedAt']))
+          && request.resource.data.keys().hasOnly(['uid', 'displayName', 'email', 'role', 'timezone', 'country', 'region', 'title', 'joinedAt']))
           || (signedIn()
           && memberId == request.auth.uid
           && request.resource.data.uid == memberId
@@ -104,18 +128,30 @@ service cloud.firestore {
           && getAfter(/databases/$(database)/documents/teams/$(teamId)/invites/$(request.resource.data.inviteId)).data.acceptedBy == request.auth.uid
           && request.resource.data.email == request.auth.token.email
           && request.resource.data.role == get(/databases/$(database)/documents/teams/$(teamId)/invites/$(request.resource.data.inviteId)).data.role
-          && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'role', 'timezone', 'joinedAt', 'inviteId']));
-        allow update: if isAdmin(teamId)
+          && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'role', 'timezone', 'country', 'region', 'title', 'joinedAt', 'inviteId']));
+        allow update: if (isAdmin(teamId)
           && memberId != get(/databases/$(database)/documents/teams/$(teamId)).data.ownerUid
           && request.resource.data.uid == resource.data.uid
           && request.resource.data.email == resource.data.email
           && request.resource.data.joinedAt == resource.data.joinedAt
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'displayName', 'role', 'timezone'
+            'displayName', 'role', 'timezone', 'country', 'region', 'title'
           ])
           && request.resource.data.role in ['Admin', 'Member', 'Viewer']
           && (isOwner(teamId)
-            || (resource.data.role in ['Member', 'Viewer'] && request.resource.data.role in ['Member', 'Viewer']));
+            || (resource.data.role in ['Member', 'Viewer'] && request.resource.data.role in ['Member', 'Viewer']))
+          && (!('title' in request.resource.data) || (request.resource.data.title is string && request.resource.data.title.size() <= 80)))
+          || (signedIn()
+            && memberId == request.auth.uid
+            && request.resource.data.uid == resource.data.uid
+            && request.resource.data.email == resource.data.email
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.joinedAt == resource.data.joinedAt
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['timezone', 'country', 'region', 'displayName', 'title'])
+            && (!('timezone' in request.resource.data) || request.resource.data.timezone is string)
+            && (!('country' in request.resource.data) || (request.resource.data.country is string && request.resource.data.country.size() <= 80))
+            && (!('region' in request.resource.data) || (request.resource.data.region is string && request.resource.data.region.size() <= 80))
+            && (!('title' in request.resource.data) || (request.resource.data.title is string && request.resource.data.title.size() <= 80)));
         allow delete: if isAdmin(teamId)
           && memberId != request.auth.uid
           && memberId != get(/databases/$(database)/documents/teams/$(teamId)).data.ownerUid

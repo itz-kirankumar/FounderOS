@@ -878,6 +878,124 @@ a {
   max-width: 820px;
   min-height: 230px;
 }
+.setup-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: radial-gradient(ellipse at 50% 0%, #edf6ef 0, var(--paper) 54%);
+}
+.setup-card {
+  width: min(100%, 660px);
+  padding: 34px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 18px 60px #233e2a0b;
+}
+.setup-card > .brand-mark {
+  margin-bottom: 24px;
+}
+.setup-card h1 {
+  margin: 9px 0;
+  font: 750 28px var(--display);
+  letter-spacing: -1px;
+}
+.setup-intro,
+.settings-description,
+.settings-subheading p {
+  max-width: 610px;
+  color: #77827a;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.company-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px;
+  margin: 22px 0 15px;
+}
+.company-form label {
+  display: grid;
+  gap: 6px;
+  color: #58655c;
+  font-size: 10px;
+  font-weight: 650;
+}
+.company-form input,
+.company-form select,
+.member-title-input {
+  width: 100%;
+  height: 37px;
+  min-width: 0;
+  border: 1px solid #e2e8e2;
+  border-radius: 7px;
+  background: #fff;
+  padding: 0 10px;
+  color: #334139;
+  font-size: 11px;
+}
+.company-form input:focus,
+.company-form select:focus,
+.member-title-input:focus {
+  outline: 2px solid #c4dfca;
+  border-color: #7eae88;
+}
+.company-form input:disabled,
+.company-form select:disabled {
+  background: #f7f9f7;
+  color: #768078;
+}
+.setup-submit {
+  min-height: 38px;
+  gap: 8px;
+}
+.setup-card > small {
+  display: block;
+  margin-top: 14px;
+  color: #879188;
+  font-size: 10px;
+}
+.settings-company-form {
+  margin-top: 16px;
+}
+.company-save {
+  margin-bottom: 14px;
+}
+.settings-subheading {
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  margin-top: 12px;
+}
+.settings-subheading h3 {
+  margin: 7px 0 0;
+  font-size: 13px;
+}
+.settings-subheading p {
+  margin: 5px 0 0;
+  font-size: 10px;
+}
+.location-form {
+  margin-top: 12px;
+}
+.member-title-input {
+  width: 160px;
+  height: 30px;
+  font-size: 10px;
+}
+.member-local-time {
+  color: #4f8060 !important;
+}
+.member-copy small {
+  line-height: 1.4;
+}
+.member-controls {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.settings-description {
+  margin: 5px 0 15px;
+}
 .member-row {
   display: flex;
   align-items: center;
@@ -1742,6 +1860,21 @@ a {
   opacity: 0.5;
 }
 @media (max-width: 700px) {
+  .setup-shell {
+    padding: 16px;
+  }
+  .setup-card {
+    padding: 23px 19px;
+  }
+  .setup-card h1 {
+    font-size: 23px;
+  }
+  .company-form {
+    grid-template-columns: 1fr;
+  }
+  .member-title-input {
+    width: 100%;
+  }
   .timezone-prompt {
     flex-wrap: wrap;
   }
