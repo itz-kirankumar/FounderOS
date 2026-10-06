@@ -26,7 +26,7 @@ Open `http://localhost:3000`. Choose **Continue with local demo** to use the Aut
 2. Enable Google under **Authentication → Sign-in method**.
 3. Add every production hostname under **Authentication → Settings → Authorized domains**.
 4. Create the Cloud Firestore database and a Cloud Storage bucket.
-5. Set the Web App configuration as build-time environment variables using the names in `.env.example`, including `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`. Set `NEXT_PUBLIC_USE_FIREBASE_EMULATOR=false` or leave it unset in production. `NEXT_PUBLIC_*` values are embedded in the browser bundle at build time, so configure them in the deployment provider before building.
+5. Set the Web App configuration as build-time environment variables using the names in `.env.example`, including `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`. Set `NEXT_PUBLIC_USE_FIREBASE_EMULATOR=false` or leave it unset in production. `NEXT_PUBLIC_*` values are embedded in the browser bundle at build time, so configure them in the deployment provider before building. Optional `NEXT_PUBLIC_FIREBASE_DATABASE_URL` and `NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID` enable Realtime Database configuration and Firebase Analytics in production.
 6. Restrict the Firebase API key to the required APIs and application domains in Google Cloud. Firebase Web configuration is public client configuration; never put a service-account key or Admin SDK credential in this app or in a `NEXT_PUBLIC_*` variable.
 7. Deploy the Firestore rules, Storage rules, and indexes to the intended project:
 

@@ -1,4 +1,5 @@
 import { getApp, getApps, initializeApp } from "firebase/app";
+import { getAnalytics, isSupported } from "firebase/analytics";
 import { connectAuthEmulator, getAuth } from "firebase/auth";
 import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
 import { connectStorageEmulator, getStorage } from "firebase/storage";
@@ -57,12 +58,31 @@ const firebaseConfig = {
     process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID ||
     fallback.messagingSenderId,
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || fallback.appId,
+  ...(process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL
+    ? { databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL }
+    : {}),
+  ...(process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID
+    ? { measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID }
+    : {}),
 };
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
+
+if (
+  typeof window !== "undefined" &&
+  firebaseReady &&
+  !isFirebaseEmulator &&
+  firebaseConfig.measurementId
+) {
+  void isSupported()
+    .then((supported) => {
+      if (supported) getAnalytics(app);
+    })
+    .catch(() => undefined);
+}
 
 let emulatorsConnected = false;
 if (typeof window !== "undefined" && emulatorEnabled && !emulatorsConnected) {
