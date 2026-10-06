@@ -1,0 +1,15 @@
+node_modules
+.next
+out
+.env*
+!.env.example
+.firebase
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+coverage
+playwright-report
+test-results
+.vercel
+.turbo
+*.tsbuildinfo

@@ -1,0 +1,41 @@
+{
+  "name": "founderos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Founder accountability and operating system",
+  "engines": {
+    "node": ">=20.9.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "emulators": "firebase emulators:start --project demo-founderos",
+    "typecheck": "tsc --noEmit",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" package.json tsconfig.json next.config.ts firebase.json firestore.indexes.json README.md .github/**/*.yml .github/dependabot.yml",
+    "check": "npm run typecheck && npm run format:check"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "date-fns": "^4.4.0",
+    "date-fns-tz": "^3.2.0",
+    "firebase": "^12.19.0",
+    "lucide-react": "^1.52.0",
+    "next": "^16.3.8",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "prettier": "^3.9.9",
+    "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.13.6"
+  }
+}

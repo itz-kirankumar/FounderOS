@@ -1,0 +1,183 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(teamId) {
+      return signedIn() && exists(/databases/$(database)/documents/teams/$(teamId)/members/$(request.auth.uid));
+    }
+
+    function isOwner(teamId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/teams/$(teamId)).data.ownerUid == request.auth.uid;
+    }
+
+    function validCreatedRecord() {
+      return request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validTask() {
+      return request.resource.data.keys().hasAll([
+          'title', 'status', 'priority', 'ownerUid', 'dueAt', 'timezone', 'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'title', 'description', 'status', 'priority', 'ownerUid', 'projectId',
+          'startDate', 'dueAt', 'timezone', 'tags', 'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.title.size() <= 200
+        && request.resource.data.status in ['Backlog', 'Planned', 'In Progress', 'Blocked', 'Completed', 'Cancelled']
+        && request.resource.data.priority in ['Low', 'Medium', 'High', 'Critical']
+        && request.resource.data.ownerUid is string
+        && request.resource.data.dueAt is timestamp
+        && request.resource.data.timezone is string
+        && (!('description' in request.resource.data)
+          || (request.resource.data.description is string
+            && request.resource.data.description.size() <= 5000))
+        && validCreatedRecord();
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly([
+          'displayName', 'email', 'photoURL', 'timezone', 'locale', 'timeFormat',
+          'timezoneSource', 'timezoneConfirmed', 'teamId', 'updatedAt'
+        ])
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /teams/{teamId} {
+      allow create: if signedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['name', 'ownerUid', 'timezone', 'createdAt'])
+        && request.resource.data.name is string
+        && request.resource.data.createdAt == request.time;
+      allow read: if isMember(teamId);
+      allow update: if isMember(teamId)
+        && isOwner(teamId)
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'timezone']);
+      allow delete: if false;
+
+      match /members/{memberId} {
+        allow read: if isMember(teamId);
+        allow create: if isOwner(teamId)
+          && request.resource.data.uid == memberId
+          && request.resource.data.role in ['Owner', 'Member'];
+        allow update: if isMember(teamId)
+          && isOwner(teamId)
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'displayName', 'email', 'role', 'timezone'
+          ]);
+        allow delete: if isMember(teamId) && isOwner(teamId) && memberId != request.auth.uid;
+      }
+
+      match /tasks/{taskId} {
+        allow read: if isMember(teamId);
+        allow create: if isMember(teamId) && validTask();
+        allow update: if isMember(teamId)
+          && request.resource.data.createdBy == resource.data.createdBy
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.keys().hasOnly([
+            'title', 'description', 'status', 'priority', 'ownerUid', 'projectId',
+          'startDate', 'dueAt', 'timezone', 'tags', 'createdBy', 'createdAt', 'updatedAt'
+          ])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'title', 'description', 'status', 'priority', 'ownerUid', 'projectId',
+            'startDate', 'dueAt', 'timezone', 'tags', 'updatedAt'
+          ])
+          && request.resource.data.status in ['Backlog', 'Planned', 'In Progress', 'Blocked', 'Completed', 'Cancelled']
+          && request.resource.data.priority in ['Low', 'Medium', 'High', 'Critical']
+          && request.resource.data.dueAt is timestamp
+          && request.resource.data.timezone is string;
+        allow delete: if false;
+      }
+
+      match /commitments/{commitmentId} {
+        allow read: if isMember(teamId);
+        allow create: if isMember(teamId)
+          && validCreatedRecord()
+          && request.resource.data.keys().hasAll(['description', 'status', 'priority', 'ownerUid', 'dueAt', 'timezone', 'createdBy', 'createdAt', 'updatedAt'])
+          && request.resource.data.keys().hasOnly([
+            'description', 'status', 'priority', 'ownerUid', 'dueAt', 'timezone',
+            'createdBy', 'createdAt', 'updatedAt'
+          ])
+          && request.resource.data.description is string
+          && request.resource.data.description.size() > 0
+          && request.resource.data.description.size() <= 1000
+          && request.resource.data.status in ['Active', 'Completed', 'Missed', 'Cancelled']
+          && request.resource.data.dueAt is timestamp
+          && request.resource.data.timezone is string
+          && request.resource.data.priority in ['Low', 'Medium', 'High', 'Critical'];
+        allow update: if isMember(teamId)
+          && request.resource.data.createdBy == resource.data.createdBy
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'description', 'status', 'priority', 'dueAt', 'timezone', 'updatedAt'
+          ])
+          && request.resource.data.status in ['Active', 'Completed', 'Missed', 'Cancelled']
+          && request.resource.data.dueAt is timestamp
+          && request.resource.data.timezone is string;
+        allow delete: if false;
+      }
+
+      match /projects/{projectId} {
+        allow read: if isMember(teamId);
+        allow create: if isMember(teamId)
+          && validCreatedRecord()
+          && request.resource.data.keys().hasAll(['title', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+          && request.resource.data.keys().hasOnly([
+            'title', 'status', 'description', 'createdBy', 'createdAt', 'updatedAt'
+          ])
+          && request.resource.data.title is string
+          && request.resource.data.title.size() > 0
+          && request.resource.data.title.size() <= 200
+          && (!('description' in request.resource.data)
+            || (request.resource.data.description is string
+              && request.resource.data.description.size() <= 5000))
+          && request.resource.data.status in ['Active', 'Completed', 'On Hold'];
+        allow update: if isMember(teamId)
+          && request.resource.data.createdBy == resource.data.createdBy
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'title', 'status', 'description', 'updatedAt'
+          ])
+          && request.resource.data.status in ['Active', 'Completed', 'On Hold'];
+        allow delete: if false;
+      }
+
+      match /activity/{activityId} {
+        allow read: if isMember(teamId);
+        allow create: if isMember(teamId)
+          && request.resource.data.actor == request.auth.uid
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.keys().hasAll(['type', 'title', 'actor', 'entityId', 'createdAt'])
+          && request.resource.data.keys().hasOnly(['type', 'title', 'detail', 'actor', 'entityId', 'createdAt'])
+          && request.resource.data.type is string
+          && request.resource.data.title is string
+          && request.resource.data.title.size() <= 1000
+          && (!('detail' in request.resource.data)
+            || (request.resource.data.detail is string
+              && request.resource.data.detail.size() <= 2000));
+        allow update, delete: if false;
+      }
+
+      match /{document=**} {
+        allow read, write: if false;
+      }
+    }
+  }
+}
