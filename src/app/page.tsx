@@ -1378,6 +1378,16 @@ export default function Home() {
     }
   };
   const displayName = user?.displayName?.split(" ")[0] || "Founder";
+  const activityActorLabel = (actor?: string) => {
+    if (!actor) return "A teammate";
+    if (actor === user?.uid) return "You";
+    const member = members.find((candidate) => candidate.id === actor);
+    return (
+      member?.displayName?.trim() ||
+      member?.email?.split("@")[0] ||
+      "A teammate"
+    );
+  };
   const todayKey = dateKeyInTimezone(new Date(), zone);
   const todayTasks = tasks
     .filter((task) => {
@@ -2365,15 +2375,11 @@ export default function Home() {
                   {activity.slice(0, 4).map((a, i) => (
                     <div className="activity-row" key={a.id}>
                       <div className={`activity-avatar tone-${i % 3}`}>
-                        {(a.actor || displayName).slice(0, 1).toUpperCase()}
+                        {activityActorLabel(a.actor).slice(0, 1).toUpperCase()}
                       </div>
                       <div>
                         <p>
-                          <b>
-                            {a.actor === user.uid
-                              ? "You"
-                              : a.actor || "A teammate"}
-                          </b>{" "}
+                          <b>{activityActorLabel(a.actor)}</b>{" "}
                           {a.title?.toLowerCase() || "updated workspace"}
                         </p>
                         <small>
@@ -3581,13 +3587,11 @@ export default function Home() {
               {activity.map((a, i) => (
                 <div className="activity-row large" key={a.id}>
                   <div className={`activity-avatar tone-${i % 3}`}>
-                    {(a.actor || displayName).slice(0, 1).toUpperCase()}
+                    {activityActorLabel(a.actor).slice(0, 1).toUpperCase()}
                   </div>
                   <div>
                     <p>
-                      <b>
-                        {a.actor === user.uid ? "You" : a.actor || "A teammate"}
-                      </b>{" "}
+                      <b>{activityActorLabel(a.actor)}</b>{" "}
                       {a.title?.toLowerCase() || "updated workspace"}
                     </p>
                     <small>
