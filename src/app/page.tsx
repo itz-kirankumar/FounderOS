@@ -77,6 +77,7 @@ import {
 } from "@/lib/data";
 import {
   deleteGoogleMeeting,
+  findGoogleMeeting,
   getGoogleMeeting,
   requestGoogleCalendarAccess,
   scheduleGoogleMeeting,
@@ -1311,19 +1312,22 @@ export default function Home() {
       ) {
         invitedEmails.push(assigneeEmail);
       }
-      const meeting = task.googleCalendarEventId
+      const meetingInput = {
+        title: `FounderOS · ${task.title}`,
+        description: task.description || task.title,
+        start,
+        end,
+        timezone: task.timezone || zone,
+      };
+      const existingMeeting = task.googleCalendarEventId
         ? await getGoogleMeeting(task.googleCalendarEventId, accessToken)
-        : await scheduleGoogleMeeting(
-            {
-              title: `FounderOS · ${task.title}`,
-              description: task.description || task.title,
-              start,
-              end,
-              timezone: task.timezone || zone,
-              attendeeEmails: invitedEmails,
-            },
-            accessToken,
-          );
+        : await findGoogleMeeting(meetingInput, accessToken);
+      const meeting =
+        existingMeeting ||
+        (await scheduleGoogleMeeting(
+          { ...meetingInput, attendeeEmails: invitedEmails },
+          accessToken,
+        ));
       meetingCreatedInGoogle = true;
       setSelectedTask((current) =>
         current?.id === task.id
@@ -1411,9 +1415,35 @@ export default function Home() {
         end: toUtcInstant(meetingEnd, zone),
         timezone: zone,
       };
-      const meeting = selectedTask.googleCalendarEventId
+      const previousStart = selectedTask.meetingStart?.toDate
+        ? selectedTask.meetingStart.toDate()
+        : selectedTask.meetingStart
+          ? new Date(selectedTask.meetingStart)
+          : null;
+      const previousEnd = selectedTask.meetingEnd?.toDate
+        ? selectedTask.meetingEnd.toDate()
+        : selectedTask.meetingEnd
+          ? new Date(selectedTask.meetingEnd)
+          : null;
+      const recoveredMeetingId =
+        !selectedTask.googleCalendarEventId && previousStart && previousEnd
+          ? (
+              await findGoogleMeeting(
+                {
+                  title: `FounderOS · ${selectedTask.title}`,
+                  description: selectedTask.description || selectedTask.title,
+                  start: previousStart,
+                  end: previousEnd,
+                },
+                accessToken,
+              )
+            )?.eventId
+          : undefined;
+      const calendarEventId =
+        selectedTask.googleCalendarEventId || recoveredMeetingId;
+      const meeting = calendarEventId
         ? await updateGoogleMeeting(
-            selectedTask.googleCalendarEventId,
+            calendarEventId,
             { ...meetingInput, attendeeEmails: invitedEmails },
             accessToken,
           )
@@ -1450,7 +1480,7 @@ export default function Home() {
       setSelectedTask(scheduledTask);
       setToast(
         meeting.meetUrl
-          ? selectedTask.googleCalendarEventId
+          ? calendarEventId
             ? "Google Calendar meeting rescheduled"
             : "Google Calendar meeting scheduled"
           : "Calendar event saved; Meet link is still being prepared",

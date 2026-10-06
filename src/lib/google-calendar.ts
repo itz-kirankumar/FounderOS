@@ -181,6 +181,58 @@ export async function getGoogleMeeting(eventId: string, accessToken: string) {
   };
 }
 
+export async function findGoogleMeeting(
+  input: {
+    title: string;
+    description: string;
+    start: Date;
+    end: Date;
+  },
+  accessToken: string,
+) {
+  const params = new URLSearchParams({
+    timeMin: new Date(input.start.getTime() - 60_000).toISOString(),
+    timeMax: new Date(input.end.getTime() + 60_000).toISOString(),
+    q: "FounderOS",
+    singleEvents: "true",
+    orderBy: "startTime",
+    conferenceDataVersion: "1",
+  });
+  const response = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(
+      typeof result?.error?.message === "string"
+        ? result.error.message
+        : "Google Calendar could not look for an existing meeting.",
+    );
+  }
+  const startTime = input.start.getTime();
+  const candidates = (result.items || []).filter(
+    (event: {
+      id?: string;
+      summary?: string;
+      description?: string;
+      start?: { dateTime?: string };
+    }) =>
+      event.id &&
+      event.summary === input.title &&
+      event.description === input.description &&
+      event.start?.dateTime &&
+      Math.abs(new Date(event.start.dateTime).getTime() - startTime) <= 60_000,
+  );
+  if (candidates.length > 1) {
+    throw new Error(
+      "More than one matching Google Calendar event exists. Remove the duplicate events in Google Calendar, then retry.",
+    );
+  }
+  if (!candidates.length) return null;
+  return getGoogleMeeting(candidates[0].id as string, accessToken);
+}
+
 export async function deleteGoogleMeeting(
   eventId: string,
   accessToken: string,
